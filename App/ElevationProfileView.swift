@@ -68,7 +68,33 @@ struct ElevationProfileView: View {
                         .lineStyle(StrokeStyle(lineWidth: 1.5))
                 }
             }
-            .chartXSelection(range: $selectedKmRange)
+            // chartXSelection(range:) has no built-in gesture on iOS, so the
+            // range drag is explicit: horizontal drag anywhere on the plot.
+            .chartOverlay { proxy in
+                GeometryReader { geometry in
+                    Rectangle()
+                        .fill(.clear)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 8)
+                                .onChanged { drag in
+                                    guard let plotAnchor = proxy.plotFrame else { return }
+                                    let plot = geometry[plotAnchor]
+                                    let fromX = drag.startLocation.x - plot.origin.x
+                                    let toX = drag.location.x - plot.origin.x
+                                    guard let a: Double = proxy.value(atX: fromX),
+                                        let b: Double = proxy.value(atX: toX)
+                                    else { return }
+                                    let maxKm = linearized.totalDistance / 1000
+                                    let low = max(0, min(a, b))
+                                    let high = min(maxKm, max(a, b))
+                                    if high - low > 0.02 {
+                                        selectedKmRange = low...high
+                                    }
+                                }
+                        )
+                }
+            }
             .chartYScale(domain: elevationDomain)
             .chartXAxis {
                 AxisMarks { value in
