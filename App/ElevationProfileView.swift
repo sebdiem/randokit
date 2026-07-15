@@ -34,6 +34,10 @@ struct ElevationProfileView: View {
     @State private var isArmed = false
     @State private var showsPanHint = false
     @AppStorage("profilePanHintShown") private var panHintShown = false
+    @State private var autoPanTask: Task<Void, Never>?
+    @State private var autoPanDirection: Double = 0
+    @State private var lastDragX: CGFloat = 0
+    @State private var lastDragPlot: CGRect = .zero
 
     private enum DragMode {
         case panning
@@ -106,6 +110,9 @@ struct ElevationProfileView: View {
             if selectedKmRange != nil {
                 isArmed = false
             }
+        }
+        .onDisappear {
+            stopAutoPan()
         }
     }
 
@@ -398,18 +405,11 @@ struct ElevationProfileView: View {
                     if high - low > 0.02 {
                         selectedKmRange = low...high
                     }
-                case .adjustLower:
-                    if let selection = selectedKmRange {
-                        let newLower = min(
-                            xToKm(drag.location.x, plot: plotFrame), selection.upperBound - 0.02)
-                        selectedKmRange = max(0, newLower)...selection.upperBound
-                    }
-                case .adjustUpper:
-                    if let selection = selectedKmRange {
-                        let newUpper = max(
-                            xToKm(drag.location.x, plot: plotFrame), selection.lowerBound + 0.02)
-                        selectedKmRange = selection.lowerBound...min(maxKm, newUpper)
-                    }
+                case .adjustLower, .adjustUpper:
+                    lastDragX = drag.location.x
+                    lastDragPlot = plotFrame
+                    reapplyDraggedEdge()
+                    updateAutoPan(forX: drag.location.x, plot: plotFrame)
                 case .panning:
                     pan(translationX: drag.translation.width, plot: plotFrame)
                 case nil:
@@ -424,7 +424,89 @@ struct ElevationProfileView: View {
                 dragMode = nil
                 defineAnchorKm = nil
                 panConsumedX = 0
+                stopAutoPan()
             }
+    }
+
+    /// Applies the finger position to the dragged measurement edge. Called
+    /// from gesture ticks AND from auto-pan steps (finger stationary at the
+    /// plot edge while the window scrolls underneath — `xToKm` clamps to the
+    /// visible domain, so the edge follows the moving window).
+    private func reapplyDraggedEdge() {
+        guard lastDragPlot.width > 0 else { return }
+        switch dragMode {
+        case .adjustLower:
+            if let selection = selectedKmRange {
+                let newLower = min(
+                    xToKm(lastDragX, plot: lastDragPlot), selection.upperBound - 0.02)
+                selectedKmRange = max(0, newLower)...selection.upperBound
+            }
+        case .adjustUpper:
+            if let selection = selectedKmRange {
+                let newUpper = max(
+                    xToKm(lastDragX, plot: lastDragPlot), selection.lowerBound + 0.02)
+                selectedKmRange = selection.lowerBound...min(maxKm, newUpper)
+            }
+        case .panning, .defining, nil:
+            break
+        }
+    }
+
+    // MARK: - Handle-only edge auto-pan
+    //
+    // Only handle drags auto-pan: they unambiguously mean measurement editing.
+    // A short dwell prevents accidental triggering when brushing the edge, and
+    // the speed ramps up gradually so the window never runs away.
+
+    private static let autoPanEdgeZone: CGFloat = 26
+
+    private func updateAutoPan(forX x: CGFloat, plot plotFrame: CGRect) {
+        guard dragMode == .adjustLower || dragMode == .adjustUpper,
+            let window = visibleKmRange
+        else {
+            stopAutoPan()
+            return
+        }
+        let direction: Double
+        if x > plotFrame.maxX - Self.autoPanEdgeZone, window.upperBound < maxKm - 0.0001 {
+            direction = 1
+        } else if x < plotFrame.minX + Self.autoPanEdgeZone, window.lowerBound > 0.0001 {
+            direction = -1
+        } else {
+            stopAutoPan()
+            return
+        }
+        if autoPanTask != nil, direction == autoPanDirection {
+            return
+        }
+        stopAutoPan()
+        autoPanDirection = direction
+        autoPanTask = Task { @MainActor in
+            // Dwell before the first shift.
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            var tick = 0
+            while !Task.isCancelled {
+                guard dragMode == .adjustLower || dragMode == .adjustUpper,
+                    let current = visibleKmRange
+                else { break }
+                let span = current.upperBound - current.lowerBound
+                let fraction = min(0.03 + 0.012 * Double(tick), 0.10)
+                var lower = current.lowerBound + span * fraction * direction
+                lower = max(0, min(lower, maxKm - span))
+                let shifted = lower...(lower + span)
+                guard shifted != current else { break }
+                setZoom(shifted)
+                reapplyDraggedEdge()
+                tick += 1
+                try? await Task.sleep(nanoseconds: 120_000_000)
+            }
+        }
+    }
+
+    private func stopAutoPan() {
+        autoPanTask?.cancel()
+        autoPanTask = nil
+        autoPanDirection = 0
     }
 
     /// Map-style pan, quantized so a drag emits a handful of window updates
@@ -493,6 +575,7 @@ struct ElevationProfileView: View {
                     pinchStart = (domain, (anchorKm - domain.lowerBound) / span)
                     // A pinch cancels any in-flight drag.
                     dragMode = nil
+                    stopAutoPan()
                 }
                 guard let start = pinchStart else { return }
                 let startSpan = start.domain.upperBound - start.domain.lowerBound
