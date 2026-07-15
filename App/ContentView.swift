@@ -4,13 +4,25 @@ import SwiftUI
 
 struct ContentView: View {
     @AppStorage("tileSourceID") private var tileSourceID = TileSource.ignPlanV2.id
+    @State private var selectedKmRange: ClosedRange<Double>?
     private let trace = SampleTrace.trace
     private let linearized = SampleTrace.trace.map { LinearizedTrace(trackPoints: $0.points) }
 
+    private var selectionCoordinates: [CLLocationCoordinate2D] {
+        guard let trace, let linearized, let kmRange = selectedKmRange else { return [] }
+        let meters = (kmRange.lowerBound * 1000)...(kmRange.upperBound * 1000)
+        return zip(trace.points, linearized.points)
+            .filter { meters.contains($0.1.distance) }
+            .map { CLLocationCoordinate2D(latitude: $0.0.latitude, longitude: $0.0.longitude) }
+    }
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            MapView(tileSource: .withID(tileSourceID), trace: trace)
-                .ignoresSafeArea()
+            MapView(
+                tileSource: .withID(tileSourceID), trace: trace,
+                selectionCoordinates: selectionCoordinates
+            )
+            .ignoresSafeArea()
 
             Menu {
                 Picker("Fond de carte", selection: $tileSourceID) {
@@ -28,12 +40,28 @@ struct ContentView: View {
         }
         .overlay(alignment: .bottom) {
             if let linearized {
-                ElevationProfileView(name: trace?.name, linearized: linearized)
-                    .frame(height: 200)
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 6)
+                ElevationProfileView(
+                    name: trace?.name, linearized: linearized,
+                    selectedKmRange: $selectedKmRange
+                )
+                .frame(height: 200)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 6)
             }
         }
+        .onAppear(perform: applyPresetSelection)
+    }
+
+    private func applyPresetSelection() {
+        #if DEBUG
+            // Headless UI verification: SIMCTL_CHILD_PRESET_SELECTION="0.8-1.8" (km).
+            if let preset = ProcessInfo.processInfo.environment["PRESET_SELECTION"] {
+                let parts = preset.split(separator: "-").compactMap { Double($0) }
+                if parts.count == 2, parts[0] < parts[1] {
+                    selectedKmRange = parts[0]...parts[1]
+                }
+            }
+        #endif
     }
 }
 
@@ -49,6 +77,7 @@ enum SampleTrace {
 struct MapView: UIViewRepresentable {
     let tileSource: TileSource
     let trace: GPXTrace?
+    let selectionCoordinates: [CLLocationCoordinate2D]
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -68,6 +97,7 @@ struct MapView: UIViewRepresentable {
     func updateUIView(_ view: MLNMapView, context: Context) {
         context.coordinator.parent = self
         apply(tileSource, to: view)
+        context.coordinator.syncSelection(on: view)
     }
 
     private func apply(_ source: TileSource, to view: MLNMapView) {
@@ -91,6 +121,36 @@ struct MapView: UIViewRepresentable {
         func mapView(_ mapView: MLNMapView, didFinishLoading style: MLNStyle) {
             addTraceLayers(to: style)
             frameTrace(on: mapView)
+            syncSelection(on: mapView)
+        }
+
+        /// Keeps the orange "measured segment" overlay in sync with the profile
+        /// selection. The source is created once and its shape updated in place.
+        func syncSelection(on mapView: MLNMapView) {
+            guard let style = mapView.style else { return }
+            let coordinates = parent.selectionCoordinates
+
+            let shape: MLNShape? =
+                coordinates.count >= 2
+                ? MLNPolylineFeature(coordinates: coordinates, count: UInt(coordinates.count))
+                : nil
+
+            if let source = style.source(withIdentifier: "selection") as? MLNShapeSource {
+                source.shape = shape
+            } else if shape != nil {
+                let source = MLNShapeSource(identifier: "selection", shape: shape)
+                style.addSource(source)
+                let layer = MLNLineStyleLayer(identifier: "selection", source: source)
+                layer.lineColor = NSExpression(forConstantValue: UIColor.systemOrange)
+                layer.lineWidth = NSExpression(forConstantValue: 5)
+                layer.lineCap = NSExpression(forConstantValue: "round")
+                layer.lineJoin = NSExpression(forConstantValue: "round")
+                if let startLayer = style.layer(withIdentifier: "trace-start") {
+                    style.insertLayer(layer, below: startLayer)
+                } else {
+                    style.addLayer(layer)
+                }
+            }
         }
 
         private func addTraceLayers(to style: MLNStyle) {

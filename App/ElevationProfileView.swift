@@ -5,10 +5,7 @@ import SwiftUI
 struct ElevationProfileView: View {
     let name: String?
     let linearized: LinearizedTrace
-
-    private var stats: ElevationStats {
-        linearized.elevationStats()
-    }
+    @Binding var selectedKmRange: ClosedRange<Double>?
 
     private var elevationDomain: ClosedRange<Double> {
         let elevations = linearized.points.map(\.elevation)
@@ -21,37 +18,47 @@ struct ElevationProfileView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(name ?? "Trace")
-                    .font(.footnote.weight(.semibold))
-                    .lineLimit(1)
-                Spacer()
-                Text(summary)
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
+            header
 
-            Chart(Array(linearized.points.enumerated()), id: \.offset) { _, point in
-                AreaMark(
-                    x: .value("km", point.distance / 1000),
-                    yStart: .value("m", elevationDomain.lowerBound),
-                    yEnd: .value("m", point.elevation)
-                )
-                .foregroundStyle(
-                    .linearGradient(
-                        colors: [.purple.opacity(0.35), .purple.opacity(0.05)],
-                        startPoint: .top, endPoint: .bottom)
-                )
-                .interpolationMethod(.monotone)
+            Chart {
+                ForEach(Array(linearized.points.enumerated()), id: \.offset) { _, point in
+                    AreaMark(
+                        x: .value("km", point.distance / 1000),
+                        yStart: .value("m", elevationDomain.lowerBound),
+                        yEnd: .value("m", point.elevation)
+                    )
+                    .foregroundStyle(
+                        .linearGradient(
+                            colors: [.purple.opacity(0.35), .purple.opacity(0.05)],
+                            startPoint: .top, endPoint: .bottom)
+                    )
+                    .interpolationMethod(.monotone)
 
-                LineMark(
-                    x: .value("km", point.distance / 1000),
-                    y: .value("m", point.elevation)
-                )
-                .foregroundStyle(.purple)
-                .lineStyle(StrokeStyle(lineWidth: 2))
-                .interpolationMethod(.monotone)
+                    LineMark(
+                        x: .value("km", point.distance / 1000),
+                        y: .value("m", point.elevation)
+                    )
+                    .foregroundStyle(.purple)
+                    .lineStyle(StrokeStyle(lineWidth: 2))
+                    .interpolationMethod(.monotone)
+                }
+
+                if let selection = selectedKmRange {
+                    RectangleMark(
+                        xStart: .value("km", selection.lowerBound),
+                        xEnd: .value("km", selection.upperBound)
+                    )
+                    .foregroundStyle(.orange.opacity(0.16))
+
+                    RuleMark(x: .value("km", selection.lowerBound))
+                        .foregroundStyle(.orange)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                    RuleMark(x: .value("km", selection.upperBound))
+                        .foregroundStyle(.orange)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                }
             }
+            .chartXSelection(range: $selectedKmRange)
             .chartYScale(domain: elevationDomain)
             .chartXAxis {
                 AxisMarks { value in
@@ -78,8 +85,47 @@ struct ElevationProfileView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
     }
 
-    private var summary: String {
-        let km = linearized.totalDistance / 1000
+    @ViewBuilder
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if let selection = selectedKmRange {
+                Text("Sélection")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.orange)
+                Spacer()
+                Text(summary(for: selection))
+                    .font(.footnote.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Button {
+                    selectedKmRange = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text(name ?? "Trace")
+                    .font(.footnote.weight(.semibold))
+                    .lineLimit(1)
+                Spacer()
+                Text(summary(for: nil))
+                    .font(.footnote.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func summary(for kmRange: ClosedRange<Double>?) -> String {
+        let km: Double
+        let stats: ElevationStats
+        if let kmRange {
+            km = kmRange.upperBound - kmRange.lowerBound
+            stats = linearized.elevationStats(
+                in: (kmRange.lowerBound * 1000)...(kmRange.upperBound * 1000))
+        } else {
+            km = linearized.totalDistance / 1000
+            stats = linearized.elevationStats()
+        }
         let kmText = km.formatted(.number.precision(.fractionLength(1)))
         return "\(kmText) km  ↗ \(Int(stats.gain.rounded())) m  ↘ \(Int(stats.loss.rounded())) m"
     }
