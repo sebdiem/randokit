@@ -690,16 +690,20 @@ struct MapView: UIViewRepresentable {
                     }, on: mapView)
             }
 
-            raisePositionLayer(in: style)
+            raiseOverlayLayers(in: style)
         }
 
-        /// The GPS dot must stay topmost. Trace activation is async, so its
-        /// layers can be created AFTER the position layer — re-raise it
-        /// whenever other layers may have been added above.
-        private func raisePositionLayer(in style: MLNStyle) {
-            guard let layer = style.layer(withIdentifier: "position") else { return }
-            style.removeLayer(layer)
-            style.addLayer(layer)
+        /// Trace activation is async, so overlay layers can be created before
+        /// the trace layers and end up underneath them. Re-raising in
+        /// canonical order keeps: pins above the line, flags above pins,
+        /// tap marker above flags, GPS dot topmost.
+        private func raiseOverlayLayers(in style: MLNStyle) {
+            for identifier in ["waypoints", "trace-start", "trace-end", "tap-marker", "position"] {
+                if let layer = style.layer(withIdentifier: identifier) {
+                    style.removeLayer(layer)
+                    style.addLayer(layer)
+                }
+            }
         }
 
         /// GPX waypoints (refuges, cols, POIs) as teal pin badges. Icon
@@ -716,9 +720,7 @@ struct MapView: UIViewRepresentable {
             if let source = style.source(withIdentifier: "waypoints") as? MLNShapeSource {
                 source.shape = shape
             } else {
-                if let pin = Self.badgeImage(
-                    symbol: "mappin", colors: [.systemTeal], diameter: 20, pointSize: 11)
-                {
+                if let pin = Self.waypointPinImage() {
                     style.setImage(pin, forName: "waypoint-pin")
                 }
                 let source = MLNShapeSource(identifier: "waypoints", shape: shape)
@@ -727,6 +729,29 @@ struct MapView: UIViewRepresentable {
                 layer.iconImageName = NSExpression(forConstantValue: "waypoint-pin")
                 layer.iconAllowsOverlap = NSExpression(forConstantValue: true)
                 style.addLayer(layer)
+            }
+        }
+
+        /// Teal map pin on a transparent background, with a white halo for
+        /// readability over any terrain (drawn by stamping a heavier white
+        /// glyph at small offsets behind the colored one).
+        private static func waypointPinImage() -> UIImage? {
+            let haloConfiguration = UIImage.SymbolConfiguration(pointSize: 14, weight: .heavy)
+                .applying(UIImage.SymbolConfiguration(paletteColors: [.white]))
+            let configuration = UIImage.SymbolConfiguration(pointSize: 14, weight: .bold)
+                .applying(UIImage.SymbolConfiguration(paletteColors: [.systemTeal]))
+            guard let halo = UIImage(systemName: "mappin", withConfiguration: haloConfiguration),
+                let glyph = UIImage(systemName: "mappin", withConfiguration: configuration)
+            else { return nil }
+            let size = CGSize(width: glyph.size.width + 4, height: glyph.size.height + 4)
+            return UIGraphicsImageRenderer(size: size).image { _ in
+                let origin = CGPoint(
+                    x: (size.width - glyph.size.width) / 2,
+                    y: (size.height - glyph.size.height) / 2)
+                for offset in [(-1.0, 0.0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)] {
+                    halo.draw(at: CGPoint(x: origin.x + offset.0, y: origin.y + offset.1))
+                }
+                glyph.draw(at: origin)
             }
         }
 
@@ -836,7 +861,7 @@ struct MapView: UIViewRepresentable {
                 } else {
                     style.addLayer(layer)
                 }
-                raisePositionLayer(in: style)
+                raiseOverlayLayers(in: style)
             }
         }
 
