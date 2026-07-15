@@ -24,6 +24,7 @@ struct ContentView: View {
             MapView(
                 tileSource: .withID(tileSourceID),
                 trace: library.active?.trace,
+                waypoints: library.active?.trace.waypoints ?? [],
                 traceKey: library.active?.entryID ?? "none",
                 selectionCoordinates: selectionCoordinates,
                 positionCoordinate: location.lastFix?.coordinate,
@@ -482,6 +483,7 @@ struct MapCameraCommand: Equatable {
 struct MapView: UIViewRepresentable {
     let tileSource: TileSource
     let trace: GPXTrace?
+    let waypoints: [Waypoint]
     let traceKey: String
     let selectionCoordinates: [CLLocationCoordinate2D]
     let positionCoordinate: CLLocationCoordinate2D?
@@ -677,6 +679,7 @@ struct MapView: UIViewRepresentable {
                 style.addLayer(stroke)
             }
 
+            syncWaypointPins(style: style)
             syncEndpointMarkers(style: style, hidden: shape == nil)
 
             if framedTraceKey != parent.traceKey, let points = trace?.points, !points.isEmpty {
@@ -697,6 +700,34 @@ struct MapView: UIViewRepresentable {
             guard let layer = style.layer(withIdentifier: "position") else { return }
             style.removeLayer(layer)
             style.addLayer(layer)
+        }
+
+        /// GPX waypoints (refuges, cols, POIs) as teal pin badges. Icon
+        /// images survive offline — text labels would need remote font
+        /// glyphs — so names are revealed by the tap-info interaction.
+        private func syncWaypointPins(style: MLNStyle) {
+            let features = parent.waypoints.map { waypoint -> MLNPointFeature in
+                let feature = MLNPointFeature()
+                feature.coordinate = CLLocationCoordinate2D(
+                    latitude: waypoint.latitude, longitude: waypoint.longitude)
+                return feature
+            }
+            let shape = MLNShapeCollectionFeature(shapes: features)
+            if let source = style.source(withIdentifier: "waypoints") as? MLNShapeSource {
+                source.shape = shape
+            } else {
+                if let pin = Self.badgeImage(
+                    symbol: "mappin", colors: [.systemTeal], diameter: 20, pointSize: 11)
+                {
+                    style.setImage(pin, forName: "waypoint-pin")
+                }
+                let source = MLNShapeSource(identifier: "waypoints", shape: shape)
+                style.addSource(source)
+                let layer = MLNSymbolStyleLayer(identifier: "waypoints", source: source)
+                layer.iconImageName = NSExpression(forConstantValue: "waypoint-pin")
+                layer.iconAllowsOverlap = NSExpression(forConstantValue: true)
+                style.addLayer(layer)
+            }
         }
 
         /// Start = green flag, finish = checkered flag — distinct from the
@@ -747,13 +778,14 @@ struct MapView: UIViewRepresentable {
         /// SF symbol rasterized onto a white round badge. Drawing into a
         /// bitmap guarantees real pixels — template/palette symbols passed
         /// straight to MapLibre render as black silhouettes.
-        private static func badgeImage(symbol: String, colors: [UIColor]) -> UIImage? {
-            let configuration = UIImage.SymbolConfiguration(pointSize: 13, weight: .bold)
+        private static func badgeImage(
+            symbol: String, colors: [UIColor], diameter: CGFloat = 26, pointSize: CGFloat = 13
+        ) -> UIImage? {
+            let configuration = UIImage.SymbolConfiguration(pointSize: pointSize, weight: .bold)
                 .applying(UIImage.SymbolConfiguration(paletteColors: colors))
             guard let glyph = UIImage(systemName: symbol, withConfiguration: configuration) else {
                 return nil
             }
-            let diameter: CGFloat = 26
             let size = CGSize(width: diameter, height: diameter)
             return UIGraphicsImageRenderer(size: size).image { context in
                 let circle = CGRect(origin: .zero, size: size)
