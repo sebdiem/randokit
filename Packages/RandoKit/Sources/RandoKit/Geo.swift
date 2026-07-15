@@ -40,7 +40,33 @@ public struct LinearizedTrace: Equatable, Sendable {
     /// keeping each bucket's min and max elevation. Charts stay visually
     /// identical while mark count drops orders of magnitude. Never use the
     /// result for measurements — keep the full-resolution trace for math.
-    public func downsampled(maxBuckets: Int = 500) -> [ProfilePoint] {
+    ///
+    /// With `range` (meters along the trace), only that slice is reduced,
+    /// with interpolated boundary points so the curve reaches the plot edges.
+    /// A slice already small enough is returned at full resolution — this is
+    /// what makes zooming reveal real detail.
+    public func downsampled(
+        in range: ClosedRange<Double>? = nil, maxBuckets: Int = 500
+    ) -> [ProfilePoint] {
+        guard let range else {
+            return Self.bucketReduce(points, maxBuckets: maxBuckets)
+        }
+        var slice: [ProfilePoint] = []
+        if let start = elevation(atDistance: range.lowerBound) {
+            slice.append(ProfilePoint(distance: range.lowerBound, elevation: start))
+        }
+        let lower = points.partitionIndex { $0.distance > range.lowerBound }
+        let upper = points.partitionIndex { $0.distance >= range.upperBound }
+        if lower < upper {
+            slice += points[lower..<upper]
+        }
+        if let end = elevation(atDistance: range.upperBound) {
+            slice.append(ProfilePoint(distance: range.upperBound, elevation: end))
+        }
+        return Self.bucketReduce(slice, maxBuckets: maxBuckets)
+    }
+
+    private static func bucketReduce(_ points: [ProfilePoint], maxBuckets: Int) -> [ProfilePoint] {
         guard points.count > maxBuckets * 2, let last = points.last else { return points }
         var result: [ProfilePoint] = [points[0]]
         let bucketSize = Double(points.count - 2) / Double(maxBuckets)

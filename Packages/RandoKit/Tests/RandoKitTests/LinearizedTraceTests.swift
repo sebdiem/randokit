@@ -64,4 +64,31 @@ struct LinearizedTraceTests {
         })
         #expect(trace.downsampled(maxBuckets: 500) == trace.points)
     }
+
+    @Test func rangedDownsamplingInterpolatesBoundaries() {
+        // Points every ~111 m, elevation climbing 10 m per point.
+        let trace = LinearizedTrace(trackPoints: (0..<50).map {
+            TrackPoint(latitude: 45 + Double($0) * 0.001, longitude: 6, elevation: 1000 + Double($0) * 10)
+        })
+        let slice = trace.downsampled(in: 150...450, maxBuckets: 500)
+
+        let first = slice.first!
+        let last = slice.last!
+        #expect(first.distance == 150)
+        #expect(last.distance == 450)
+        // Interpolated: 150 m is between samples at ~111 and ~222 m.
+        #expect(abs(first.elevation - (1000 + 150 / 111.195 * 10)) < 0.5)
+        #expect(abs(last.elevation - (1000 + 450 / 111.195 * 10)) < 0.5)
+        // Small slice passes through at full resolution, sorted.
+        #expect(slice.count >= 3)
+        #expect(zip(slice, slice.dropFirst()).allSatisfy { $0.distance <= $1.distance })
+    }
+
+    @Test func rangedDownsamplingReducesLargeSlices() {
+        let trace = LinearizedTrace(trackPoints: (0..<8000).map {
+            TrackPoint(latitude: 45 + Double($0) * 0.0001, longitude: 6, elevation: 1000 + Double($0 % 13))
+        })
+        let full = trace.downsampled(in: 0...trace.totalDistance, maxBuckets: 100)
+        #expect(full.count <= 202)
+    }
 }

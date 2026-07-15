@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var showsTracePicker = false
     @State private var showsFileImporter = false
     @State private var selectionCoordinates: [CLLocationCoordinate2D] = []
+    @State private var visibleKmRange: ClosedRange<Double>?
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -36,6 +37,7 @@ struct ContentView: View {
                     name: active.trace.name, linearized: active.linearized,
                     displayProfile: active.displayProfile,
                     selectedKmRange: $selectedKmRange,
+                    visibleKmRange: $visibleKmRange,
                     // Quantized to 25 m so the chart (whose position marker is
                     // a mark) doesn't re-render on every 5 m GPS fix.
                     currentKm: currentProjection.map { ($0.distanceAlong / 25).rounded() * 25 / 1000 },
@@ -200,6 +202,7 @@ struct ContentView: View {
         currentProjection = nil
         selectedKmRange = nil
         selectionCoordinates = []
+        visibleKmRange = nil
     }
 
     /// Recomputed only when the selection changes (not on every GPS fix);
@@ -254,6 +257,14 @@ struct ContentView: View {
                 if parts.count == 2, parts[0] < parts[1] {
                     selectedKmRange = parts[0]...parts[1]
                 }
+            }
+            if env["PRESET_ZOOM"] == "1", let selection = selectedKmRange,
+                let active = library.active
+            {
+                let maxKm = active.linearized.totalDistance / 1000
+                let padding = (selection.upperBound - selection.lowerBound) * 0.1
+                visibleKmRange =
+                    max(0, selection.lowerBound - padding)...min(maxKm, selection.upperBound + padding)
             }
             if env["AUTO_DOWNLOAD"] == "1", let active = library.active {
                 Task {
