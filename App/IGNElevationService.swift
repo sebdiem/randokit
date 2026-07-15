@@ -31,6 +31,9 @@ struct IGNElevationService {
         return (result, count)
     }
 
+    /// One batch, with retries: transient failures otherwise leave silent
+    /// gaps of uncorrected points mid-trace (mixed elevation sources create
+    /// seams that fabricate climb).
     private func fetchElevations(for points: [TrackPoint]) async -> [Double]? {
         var components = URLComponents(string: Self.endpoint)
         components?.queryItems = [
@@ -42,11 +45,18 @@ struct IGNElevationService {
         guard let url = components?.url else { return nil }
         var request = URLRequest(url: url)
         request.setValue("Rando/0.1 (personal hiking app)", forHTTPHeaderField: "User-Agent")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-            (response as? HTTPURLResponse)?.statusCode == 200,
-            let decoded = try? JSONDecoder().decode(Response.self, from: data),
-            decoded.elevations.count == points.count
-        else { return nil }
-        return decoded.elevations
+
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 700_000_000)
+            }
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                (response as? HTTPURLResponse)?.statusCode == 200,
+                let decoded = try? JSONDecoder().decode(Response.self, from: data),
+                decoded.elevations.count == points.count
+            else { continue }
+            return decoded.elevations
+        }
+        return nil
     }
 }
