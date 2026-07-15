@@ -68,6 +68,10 @@ struct ContentView: View {
         }
         .onChange(of: library.active?.entryID) { oldValue, _ in
             resetTracking()
+            // Re-project the last fix against the new trace: with a static
+            // position, Core Location won't deliver another fix, and the
+            // dot/marker would stay absent until the next movement.
+            handle(location.lastFix)
             // Trace activation is async; hooks that need an active trace run
             // after the first activation, not at onAppear.
             if oldValue == nil {
@@ -408,6 +412,17 @@ struct MapView: UIViewRepresentable {
                         CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
                     }, on: mapView)
             }
+
+            raisePositionLayer(in: style)
+        }
+
+        /// The GPS dot must stay topmost. Trace activation is async, so its
+        /// layers can be created AFTER the position layer — re-raise it
+        /// whenever other layers may have been added above.
+        private func raisePositionLayer(in style: MLNStyle) {
+            guard let layer = style.layer(withIdentifier: "position") else { return }
+            style.removeLayer(layer)
+            style.addLayer(layer)
         }
 
         private func syncEndpoint(
@@ -466,6 +481,7 @@ struct MapView: UIViewRepresentable {
                 } else {
                     style.addLayer(layer)
                 }
+                raisePositionLayer(in: style)
             }
         }
 
