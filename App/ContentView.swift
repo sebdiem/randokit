@@ -695,10 +695,11 @@ struct MapView: UIViewRepresentable {
 
         /// Trace activation is async, so overlay layers can be created before
         /// the trace layers and end up underneath them. Re-raising in
-        /// canonical order keeps: pins above the line, flags above pins,
-        /// tap marker above flags, GPS dot topmost.
+        /// canonical order keeps: flags above the line, the tap marker above
+        /// flags, pins above the tap marker (tapping a pin must not cover
+        /// it — the ring circles its tip), GPS dot topmost.
         private func raiseOverlayLayers(in style: MLNStyle) {
-            for identifier in ["waypoints", "trace-start", "trace-end", "tap-marker", "position"] {
+            for identifier in ["trace-start", "trace-end", "tap-marker", "waypoints", "position"] {
                 if let layer = style.layer(withIdentifier: identifier) {
                     style.removeLayer(layer)
                     style.addLayer(layer)
@@ -728,6 +729,8 @@ struct MapView: UIViewRepresentable {
                 let layer = MLNSymbolStyleLayer(identifier: "waypoints", source: source)
                 layer.iconImageName = NSExpression(forConstantValue: "waypoint-pin")
                 layer.iconAllowsOverlap = NSExpression(forConstantValue: true)
+                // The pin's needle tip sits ON the waypoint position.
+                layer.iconAnchor = NSExpression(forConstantValue: "bottom")
                 style.addLayer(layer)
             }
         }
