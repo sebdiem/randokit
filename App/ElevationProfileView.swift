@@ -6,6 +6,8 @@ struct ElevationProfileView: View {
     let name: String?
     let linearized: LinearizedTrace
     @Binding var selectedKmRange: ClosedRange<Double>?
+    var currentKm: Double?
+    var positionIsOnTrack = false
 
     private var elevationDomain: ClosedRange<Double> {
         let elevations = linearized.points.map(\.elevation)
@@ -41,6 +43,14 @@ struct ElevationProfileView: View {
                     .foregroundStyle(.purple)
                     .lineStyle(StrokeStyle(lineWidth: 2))
                     .interpolationMethod(.monotone)
+                }
+
+                // "You are here" marker; gray when the position is off the
+                // trace and the projected abscissa is therefore approximate.
+                if let currentKm {
+                    RuleMark(x: .value("km", currentKm))
+                        .foregroundStyle(positionIsOnTrack ? Color.blue : Color.gray.opacity(0.6))
+                        .lineStyle(StrokeStyle(lineWidth: 2))
                 }
 
                 if let selection = selectedKmRange {

@@ -6,8 +6,12 @@ struct ContentView: View {
     @AppStorage("tileSourceID") private var tileSourceID = TileSource.ignPlanV2.id
     @State private var selectedKmRange: ClosedRange<Double>?
     @StateObject private var downloader = CorridorDownloader()
+    @StateObject private var location = LocationService()
+    @State private var monitor = OffTrackMonitor()
+    @State private var currentProjection: TraceProjection?
     private let trace = SampleTrace.trace
     private let linearized = SampleTrace.trace.map { LinearizedTrace(trackPoints: $0.points) }
+    private let projector = SampleTrace.trace.map { TraceProjector(trackPoints: $0.points) }
 
     private var selectionCoordinates: [CLLocationCoordinate2D] {
         guard let trace, let linearized, let kmRange = selectedKmRange else { return [] }
@@ -21,7 +25,9 @@ struct ContentView: View {
         ZStack(alignment: .topTrailing) {
             MapView(
                 tileSource: .withID(tileSourceID), trace: trace,
-                selectionCoordinates: selectionCoordinates
+                selectionCoordinates: selectionCoordinates,
+                positionCoordinate: location.lastFix?.coordinate,
+                positionColor: positionColor
             )
             .ignoresSafeArea()
 
@@ -64,7 +70,9 @@ struct ContentView: View {
             if let linearized {
                 ElevationProfileView(
                     name: trace?.name, linearized: linearized,
-                    selectedKmRange: $selectedKmRange
+                    selectedKmRange: $selectedKmRange,
+                    currentKm: currentProjection.map { $0.distanceAlong / 1000 },
+                    positionIsOnTrack: monitor.status == .onTrack
                 )
                 .frame(height: 200)
                 .padding(.horizontal, 10)
@@ -72,6 +80,34 @@ struct ContentView: View {
             }
         }
         .onAppear(perform: applyPresetSelection)
+        .onAppear {
+            location.start()
+        }
+        .onReceive(location.$lastFix) { fix in
+            handle(fix)
+        }
+    }
+
+    /// Dot color is the whole off-track UI: blue on track, red off, gray
+    /// while approaching the start, past the end, or without a status yet.
+    private var positionColor: UIColor {
+        switch monitor.status {
+        case .onTrack: .systemBlue
+        case .offTrack: .systemRed
+        case .approachingStart, .finished, .unknown: .systemGray
+        }
+    }
+
+    private func handle(_ fix: CLLocation?) {
+        guard let fix, let projector,
+            let projection = projector.project(
+                latitude: fix.coordinate.latitude, longitude: fix.coordinate.longitude,
+                nearSegment: currentProjection?.segmentIndex)
+        else { return }
+        monitor.update(
+            projection: projection, horizontalAccuracy: fix.horizontalAccuracy,
+            traceLength: projector.totalDistance, timestamp: fix.timestamp)
+        currentProjection = projection
     }
 
     private func applyPresetSelection() {
@@ -88,6 +124,11 @@ struct ContentView: View {
                 Task {
                     await downloader.download(points: trace.points, source: .withID(tileSourceID))
                 }
+            }
+            // Headless verification: shrink the off-track dwell.
+            if let dwell = ProcessInfo.processInfo.environment["OFFTRACK_DWELL"]
+                .flatMap(Double.init) {
+                monitor.dwell = dwell
             }
         #endif
     }
@@ -106,6 +147,8 @@ struct MapView: UIViewRepresentable {
     let tileSource: TileSource
     let trace: GPXTrace?
     let selectionCoordinates: [CLLocationCoordinate2D]
+    let positionCoordinate: CLLocationCoordinate2D?
+    let positionColor: UIColor
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -126,6 +169,7 @@ struct MapView: UIViewRepresentable {
         context.coordinator.parent = self
         apply(tileSource, to: view)
         context.coordinator.syncSelection(on: view)
+        context.coordinator.syncPosition(on: view)
     }
 
     private func apply(_ source: TileSource, to view: MLNMapView) {
@@ -150,6 +194,34 @@ struct MapView: UIViewRepresentable {
             addTraceLayers(to: style)
             frameTrace(on: mapView)
             syncSelection(on: mapView)
+            syncPosition(on: mapView)
+        }
+
+        /// GPS dot, always topmost. Color carries the off-track state.
+        func syncPosition(on mapView: MLNMapView) {
+            guard let style = mapView.style else { return }
+
+            let shape: MLNShape? = parent.positionCoordinate.map { coordinate in
+                let point = MLNPointFeature()
+                point.coordinate = coordinate
+                return point
+            }
+
+            if let source = style.source(withIdentifier: "position") as? MLNShapeSource {
+                source.shape = shape
+                if let layer = style.layer(withIdentifier: "position") as? MLNCircleStyleLayer {
+                    layer.circleColor = NSExpression(forConstantValue: parent.positionColor)
+                }
+            } else if shape != nil {
+                let source = MLNShapeSource(identifier: "position", shape: shape)
+                style.addSource(source)
+                let layer = MLNCircleStyleLayer(identifier: "position", source: source)
+                layer.circleColor = NSExpression(forConstantValue: parent.positionColor)
+                layer.circleRadius = NSExpression(forConstantValue: 9)
+                layer.circleStrokeColor = NSExpression(forConstantValue: UIColor.white)
+                layer.circleStrokeWidth = NSExpression(forConstantValue: 3)
+                style.addLayer(layer)
+            }
         }
 
         /// Keeps the orange "measured segment" overlay in sync with the profile
