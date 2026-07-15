@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var selectionCoordinates: [CLLocationCoordinate2D] = []
     @State private var visibleKmRange: ClosedRange<Double>?
     @State private var cameraCommand: MapCameraCommand?
+    @State private var profileCardHeight: CGFloat = 0
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -26,7 +27,8 @@ struct ContentView: View {
                 selectionCoordinates: selectionCoordinates,
                 positionCoordinate: location.lastFix?.coordinate,
                 positionColor: positionColor,
-                cameraCommand: cameraCommand
+                cameraCommand: cameraCommand,
+                bottomOverlayInset: profileCardHeight + 40
             )
             .ignoresSafeArea()
 
@@ -45,6 +47,11 @@ struct ContentView: View {
                 )
                 .padding(.horizontal, 10)
                 .padding(.bottom, 6)
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: {
+                    profileCardHeight = $0
+                }
             }
         }
         .sheet(isPresented: $showsTracePicker) {
@@ -353,6 +360,9 @@ struct MapView: UIViewRepresentable {
     let positionCoordinate: CLLocationCoordinate2D?
     let positionColor: UIColor
     let cameraCommand: MapCameraCommand?
+    /// Height of UI overlaying the map's bottom (profile card + margins):
+    /// framing and centering must target the visible portion only.
+    let bottomOverlayInset: CGFloat
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -375,6 +385,7 @@ struct MapView: UIViewRepresentable {
 
     func updateUIView(_ view: MLNMapView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.applyBottomInset(bottomOverlayInset, on: view)
         apply(tileSource, to: view)
         context.coordinator.syncAll(on: view)
         context.coordinator.handleCameraCommand(on: view)
@@ -414,6 +425,21 @@ struct MapView: UIViewRepresentable {
             syncTrace(on: mapView)
             syncSelection(on: mapView)
             syncPosition(on: mapView)
+        }
+
+        private var appliedBottomInset: CGFloat = 0
+
+        /// The initial trace framing can run before the profile card has
+        /// reported its height — refit when the occlusion inset changes.
+        func applyBottomInset(_ inset: CGFloat, on mapView: MLNMapView) {
+            guard inset != appliedBottomInset else { return }
+            appliedBottomInset = inset
+            guard framedTraceKey != nil, let points = parent.trace?.points, !points.isEmpty
+            else { return }
+            frame(
+                coordinates: points.map {
+                    CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+                }, on: mapView)
         }
 
         func handleCameraCommand(on mapView: MLNMapView) {
@@ -653,9 +679,11 @@ struct MapView: UIViewRepresentable {
                 bounds.ne.latitude = max(bounds.ne.latitude, coordinate.latitude)
                 bounds.ne.longitude = max(bounds.ne.longitude, coordinate.longitude)
             }
+            // The profile card overlays the map's bottom: fit into what's visible.
             mapView.setVisibleCoordinateBounds(
                 bounds,
-                edgePadding: UIEdgeInsets(top: 80, left: 50, bottom: 80, right: 50),
+                edgePadding: UIEdgeInsets(
+                    top: 80, left: 50, bottom: 40 + parent.bottomOverlayInset, right: 50),
                 animated: animated, completionHandler: nil)
         }
     }
