@@ -19,6 +19,16 @@ final class TraceLibrary: ObservableObject {
         /// Reduced profile for chart rendering only — measurements use `linearized`.
         let displayProfile: [ProfilePoint]
         let projector: TraceProjector
+        /// GPX waypoints projected onto the trace (those within 250 m of it),
+        /// for name lookups and on-profile placement.
+        let waypointMarks: [WaypointMark]
+    }
+
+    struct WaypointMark: Equatable {
+        let name: String?
+        let km: Double
+        let latitude: Double
+        let longitude: Double
     }
 
     @Published private(set) var entries: [Entry] = []
@@ -73,12 +83,24 @@ final class TraceLibrary: ObservableObject {
         }
         guard let trace, trace.points.count >= 2 else { return nil }
         let linearized = LinearizedTrace(trackPoints: trace.points)
+        let projector = TraceProjector(trace: trace)
+        let marks = trace.waypoints.compactMap { waypoint -> WaypointMark? in
+            guard
+                let projection = projector.project(
+                    latitude: waypoint.latitude, longitude: waypoint.longitude),
+                projection.crossTrackDistance < 250
+            else { return nil }
+            return WaypointMark(
+                name: waypoint.name, km: projection.distanceAlong / 1000,
+                latitude: waypoint.latitude, longitude: waypoint.longitude)
+        }
         return Active(
             entryID: entry.id,
             trace: trace,
             linearized: linearized,
             displayProfile: linearized.downsampled(),
-            projector: TraceProjector(trace: trace))
+            projector: projector,
+            waypointMarks: marks)
     }
 
     /// Loads a trace without selecting it (e.g. to download its tiles).

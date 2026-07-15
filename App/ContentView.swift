@@ -17,6 +17,7 @@ struct ContentView: View {
     @State private var visibleKmRange: ClosedRange<Double>?
     @State private var cameraCommand: MapCameraCommand?
     @State private var profileCardHeight: CGFloat = 0
+    @State private var tappedPoint: TappedPointInfo?
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -28,12 +29,22 @@ struct ContentView: View {
                 positionCoordinate: location.lastFix?.coordinate,
                 positionColor: positionColor,
                 cameraCommand: cameraCommand,
-                bottomOverlayInset: profileCardHeight + 40
+                bottomOverlayInset: profileCardHeight + 40,
+                tappedCoordinate: tappedPoint.map {
+                    CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+                },
+                onMapTap: handleMapTap
             )
             .ignoresSafeArea()
 
             controls
                 .padding(.trailing, 12)
+        }
+        .overlay(alignment: .bottom) {
+            if let tapped = tappedPoint {
+                tapInfoChip(tapped)
+                    .padding(.bottom, profileCardHeight + 14)
+            }
         }
         .overlay(alignment: .bottom) {
             if let active = library.active {
@@ -43,7 +54,9 @@ struct ContentView: View {
                     selectedKmRange: $selectedKmRange,
                     visibleKmRange: $visibleKmRange,
                     currentKm: currentProjection.map { $0.distanceAlong / 1000 },
-                    positionIsOnTrack: monitor.status == .onTrack
+                    positionIsOnTrack: monitor.status == .onTrack,
+                    tappedKm: tappedPoint?.km,
+                    onTap: { selectPoint(atKm: $0) }
                 )
                 .padding(.horizontal, 10)
                 .padding(.bottom, 6)
@@ -256,6 +269,109 @@ struct ContentView: View {
         selectedKmRange = nil
         selectionCoordinates = []
         visibleKmRange = nil
+        tappedPoint = nil
+    }
+
+    // MARK: - Tapped point info (P3)
+
+    /// Resolves a tap on the MAP: a nearby waypoint wins, otherwise the tap
+    /// snaps to the trace when close enough; a tap far from everything
+    /// dismisses the current info.
+    private func handleMapTap(_ coordinate: CLLocationCoordinate2D, thresholdMeters: Double) {
+        guard let active = library.active else { return }
+        let tapPoint = TrackPoint(latitude: coordinate.latitude, longitude: coordinate.longitude)
+
+        let nearestMark = active.waypointMarks
+            .map { mark in
+                (mark,
+                 Geo.distanceMeters(
+                    from: tapPoint,
+                    to: TrackPoint(latitude: mark.latitude, longitude: mark.longitude)))
+            }
+            .min { $0.1 < $1.1 }
+        if let (mark, distance) = nearestMark, distance < max(thresholdMeters, 60) {
+            tappedPoint = TappedPointInfo(
+                km: mark.km,
+                elevation: active.linearized.elevation(atDistance: mark.km * 1000) ?? 0,
+                latitude: mark.latitude, longitude: mark.longitude,
+                name: mark.name)
+            return
+        }
+
+        guard
+            let projection = active.projector.project(
+                latitude: coordinate.latitude, longitude: coordinate.longitude),
+            projection.crossTrackDistance < thresholdMeters,
+            let snapped = active.projector.coordinate(atDistance: projection.distanceAlong)
+        else {
+            tappedPoint = nil
+            return
+        }
+        tappedPoint = TappedPointInfo(
+            km: projection.distanceAlong / 1000,
+            elevation: active.linearized.elevation(atDistance: projection.distanceAlong) ?? 0,
+            latitude: snapped.latitude, longitude: snapped.longitude,
+            name: nil)
+    }
+
+    /// Resolves a tap on the PROFILE at a km position; adopts a waypoint's
+    /// name when one sits within 150 m along the trace.
+    private func selectPoint(atKm km: Double) {
+        guard let active = library.active,
+            let elevation = active.linearized.elevation(atDistance: km * 1000),
+            let coordinate = active.projector.coordinate(atDistance: km * 1000)
+        else { return }
+        let nearbyName = active.waypointMarks
+            .filter { abs($0.km - km) < 0.15 }
+            .min { abs($0.km - km) < abs($1.km - km) }?
+            .name
+        tappedPoint = TappedPointInfo(
+            km: km, elevation: elevation,
+            latitude: coordinate.latitude, longitude: coordinate.longitude,
+            name: nearbyName)
+    }
+
+    private func tapInfoChip(_ info: TappedPointInfo) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: info.name != nil ? "mappin.circle.fill" : "scope")
+                .foregroundStyle(.purple)
+            VStack(alignment: .leading, spacing: 1) {
+                if let name = info.name {
+                    Text(name)
+                        .font(.footnote.weight(.semibold))
+                        .lineLimit(1)
+                }
+                Text(
+                    "km \(info.km.formatted(.number.precision(.fractionLength(1)))) · \(Int(info.elevation.rounded())) m"
+                )
+                .font(.footnote.monospacedDigit())
+                .foregroundStyle(info.name == nil ? .primary : .secondary)
+            }
+            Button {
+                UIPasteboard.general.string = String(
+                    format: "%.5f, %.5f", info.latitude, info.longitude)
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Copier les coordonnées GPS")
+            Button {
+                tappedPoint = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 
     /// Recomputed only when the selection changes (not on every GPS fix);
@@ -311,6 +427,9 @@ struct ContentView: View {
                     selectedKmRange = parts[0]...parts[1]
                 }
             }
+            if let tapPreset = env["PRESET_TAP_KM"].flatMap(Double.init) {
+                selectPoint(atKm: tapPreset)
+            }
             if let zoomPreset = env["PRESET_ZOOM"], let active = library.active {
                 let maxKm = active.linearized.totalDistance / 1000
                 if zoomPreset == "1", let selection = selectedKmRange {
@@ -342,6 +461,14 @@ enum SampleTrace {
     }()
 }
 
+struct TappedPointInfo: Equatable {
+    let km: Double
+    let elevation: Double
+    let latitude: Double
+    let longitude: Double
+    let name: String?
+}
+
 struct MapCameraCommand: Equatable {
     enum Kind {
         case centerOnUser
@@ -363,6 +490,9 @@ struct MapView: UIViewRepresentable {
     /// Height of UI overlaying the map's bottom (profile card + margins):
     /// framing and centering must target the visible portion only.
     let bottomOverlayInset: CGFloat
+    let tappedCoordinate: CLLocationCoordinate2D?
+    /// Reports taps with a distance threshold equivalent to ~30 pt on screen.
+    let onMapTap: (CLLocationCoordinate2D, Double) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -375,6 +505,16 @@ struct MapView: UIViewRepresentable {
         // stack lives top-right).
         view.compassViewPosition = .topLeft
         view.compassViewMargins = CGPoint(x: 12, y: 12)
+        let tap = UITapGestureRecognizer(
+            target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
+        for recognizer in view.gestureRecognizers ?? [] {
+            if let tapRecognizer = recognizer as? UITapGestureRecognizer,
+                tapRecognizer.numberOfTapsRequired == 2
+            {
+                tap.require(toFail: tapRecognizer)
+            }
+        }
+        view.addGestureRecognizer(tap)
         // Chamonix fallback while there's no trace to frame.
         view.setCenter(
             CLLocationCoordinate2D(latitude: 45.9237, longitude: 6.8694),
@@ -424,7 +564,40 @@ struct MapView: UIViewRepresentable {
             guard mapView.style != nil else { return }
             syncTrace(on: mapView)
             syncSelection(on: mapView)
+            syncTapMarker(on: mapView)
             syncPosition(on: mapView)
+        }
+
+        @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            guard let mapView = gesture.view as? MLNMapView else { return }
+            let point = gesture.location(in: mapView)
+            let coordinate = mapView.convert(point, toCoordinateFrom: mapView)
+            let thresholdMeters = mapView.metersPerPoint(atLatitude: coordinate.latitude) * 30
+            parent.onMapTap(coordinate, thresholdMeters)
+        }
+
+        /// Marker for the inspected point: white dot with a purple ring,
+        /// distinct from the GPS dot and endpoint flags.
+        private func syncTapMarker(on mapView: MLNMapView) {
+            guard let style = mapView.style else { return }
+            let shape: MLNShape? = parent.tappedCoordinate.map { coordinate in
+                let point = MLNPointFeature()
+                point.coordinate = coordinate
+                return point
+            }
+            if let source = style.source(withIdentifier: "tap-marker") as? MLNShapeSource {
+                source.shape = shape
+            } else if shape != nil {
+                let source = MLNShapeSource(identifier: "tap-marker", shape: shape)
+                style.addSource(source)
+                let layer = MLNCircleStyleLayer(identifier: "tap-marker", source: source)
+                layer.circleColor = NSExpression(forConstantValue: UIColor.white)
+                layer.circleRadius = NSExpression(forConstantValue: 6)
+                layer.circleStrokeColor = NSExpression(
+                    forConstantValue: UIColor(red: 0.56, green: 0.14, blue: 0.67, alpha: 1))
+                layer.circleStrokeWidth = NSExpression(forConstantValue: 3)
+                style.addLayer(layer)
+            }
         }
 
         private var appliedBottomInset: CGFloat = 0

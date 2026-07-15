@@ -20,6 +20,9 @@ struct ElevationProfileView: View {
     @Binding var visibleKmRange: ClosedRange<Double>?
     var currentKm: Double?
     var positionIsOnTrack = false
+    /// Inspected point (shared with the map) and the tap that sets it.
+    var tappedKm: Double?
+    var onTap: ((Double) -> Void)?
 
     /// Visible slice re-downsampled from full resolution — zoom reveals real
     /// detail. Set synchronously with `visibleKmRange` by the zoom handlers so
@@ -280,6 +283,18 @@ struct ElevationProfileView: View {
                     }
                 }
             }
+            // Inspected point: white dot with a purple ring on the curve.
+            if let tappedKm, plotFrame.width > 0, visibleDomain.contains(tappedKm),
+                let elevation = linearized.elevation(atDistance: tappedKm * 1000)
+            {
+                Circle()
+                    .fill(.white)
+                    .overlay(Circle().stroke(.purple, lineWidth: 2.5))
+                    .frame(width: 12, height: 12)
+                    .offset(
+                        x: kmToX(tappedKm, plot: plotFrame) - 6,
+                        y: yPosition(ofElevation: elevation, plot: plotFrame) - 6)
+            }
             // GPS position: a dot ON the curve at the projected km/elevation,
             // same color semantics as the map dot. Drawn in the overlay so
             // GPS fixes never invalidate the chart.
@@ -315,9 +330,21 @@ struct ElevationProfileView: View {
         }
         .contentShape(Rectangle())
         .gesture(dragGesture(plot: plotFrame))
-        .simultaneousGesture(doubleTapGesture(plot: plotFrame))
+        .simultaneousGesture(
+            doubleTapGesture(plot: plotFrame)
+                .exclusively(before: singleTapGesture(plot: plotFrame)))
         .simultaneousGesture(magnifyGesture(plot: plotFrame))
         .simultaneousGesture(longPressGesture())
+    }
+
+    /// Single tap inspects a point (km/elevation info shared with the map).
+    /// Composed after the double-tap so zooming still wins.
+    private func singleTapGesture(plot plotFrame: CGRect) -> some Gesture {
+        SpatialTapGesture(count: 1)
+            .onEnded { tap in
+                guard plotFrame.width > 0, !isArmed else { return }
+                onTap?(xToKm(tap.location.x, plot: plotFrame))
+            }
     }
 
     @ViewBuilder
