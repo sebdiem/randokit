@@ -2,11 +2,12 @@ import Charts
 import RandoKit
 import SwiftUI
 
-/// Interaction model ("map grammar"): the profile behaves exactly like the
-/// map above it — drag pans (when zoomed), pinch zooms anchored, double-tap
-/// zooms in. A measurement is an explicit placed object (ruler button or
-/// long-press), adjusted ONLY through its two handles; it is never created or
-/// moved by plain drags. One grammar for navigation, one object for measuring.
+/// Interaction model ("map grammar"): navigation is always map-like — drag
+/// pans, pinch and double-tap zoom. A measurement becomes an object only
+/// after the user explicitly draws its endpoints: the ruler button (or a
+/// long-press) ARMS a single-use definition mode, the next drag draws the
+/// exact range, then the mode exits. Once created, only its handles move it;
+/// dragging anywhere else pans. Orange is reserved for the measurement.
 struct ElevationProfileView: View {
     let name: String?
     /// Full resolution — all measurements come from here.
@@ -25,13 +26,18 @@ struct ElevationProfileView: View {
     /// domain and points flip in the same body pass (single chart re-render).
     @State private var zoomedProfile: [ProfilePoint]?
     @State private var dragMode: DragMode?
+    @State private var defineAnchorKm: Double?
     @State private var panConsumedX: CGFloat = 0
     @State private var pinchStart: (domain: ClosedRange<Double>, anchorFraction: Double)?
     @State private var miniMapGrabOffsetKm: Double?
-    @State private var longPressCreated = false
+    /// Single-use measurement-definition mode (ruler button or long-press).
+    @State private var isArmed = false
+    @State private var showsPanHint = false
+    @AppStorage("profilePanHintShown") private var panHintShown = false
 
     private enum DragMode {
         case panning
+        case defining
         case adjustLower
         case adjustUpper
     }
@@ -52,8 +58,7 @@ struct ElevationProfileView: View {
     }
 
     /// Always derived from the FULL trace: a given slope must look equally
-    /// steep at every zoom level and pan position. Adaptive y-scaling reads
-    /// as higher resolution but actually distorts gradient perception.
+    /// steep at every zoom level and pan position.
     private var elevationDomain: ClosedRange<Double> {
         let elevations = displayProfile.map(\.elevation)
         guard let min = elevations.min(), let max = elevations.max() else {
@@ -67,7 +72,7 @@ struct ElevationProfileView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
             header
             miniMapRow
 
@@ -88,11 +93,19 @@ struct ElevationProfileView: View {
                     selectionOverlay(plot: anchor.map { geometry[$0] } ?? .zero)
                 }
             }
+            .frame(height: 130)
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
         .onChange(of: visibleKmRange) { _, newValue in
             syncZoomedProfile(to: newValue)
+        }
+        .onChange(of: selectedKmRange == nil) { _, _ in
+            // Creating or clearing a measurement always leaves definition mode.
+            if selectedKmRange != nil {
+                isArmed = false
+            }
         }
     }
 
@@ -109,18 +122,16 @@ struct ElevationProfileView: View {
         return lower...upper
     }
 
-    /// The zoom-in button only exists when it would visibly change the view.
-    private var canZoomToSelection: Bool {
-        guard let selection = selectedKmRange, let target = zoomTarget(for: selection) else {
-            return false
-        }
-        guard let current = visibleKmRange else { return true }
-        let tolerance = (current.upperBound - current.lowerBound) * 0.01
-        return abs(target.lowerBound - current.lowerBound) > tolerance
-            || abs(target.upperBound - current.upperBound) > tolerance
+    /// Recovery affordance: only offered when the measurement is partly or
+    /// fully outside the visible window.
+    private var measurementIsOffscreen: Bool {
+        guard let selection = selectedKmRange, visibleKmRange != nil else { return false }
+        let domain = visibleDomain
+        return selection.lowerBound < domain.lowerBound - 0.001
+            || selection.upperBound > domain.upperBound + 0.001
     }
 
-    private func zoomToSelection() {
+    private func showMeasurement() {
         guard let selection = selectedKmRange, let target = zoomTarget(for: selection) else { return }
         setZoom(target)
     }
@@ -149,45 +160,66 @@ struct ElevationProfileView: View {
         }
     }
 
-    // MARK: - Measurement lifecycle
+    // MARK: - Measurement arming
 
-    /// Places a measurement covering ~30% of the visible window around a km.
-    private func createMeasurement(atKm center: Double) {
-        guard maxKm > 0 else { return }
-        let window = visibleDomain
-        let span = Swift.max((window.upperBound - window.lowerBound) * 0.3, 0.04)
-        guard span < maxKm else { return }
-        let lower = Swift.max(0, Swift.min(center - span / 2, maxKm - span))
-        selectedKmRange = lower...(lower + span)
+    private func arm() {
+        guard selectedKmRange == nil, !isArmed else { return }
+        isArmed = true
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
-    // MARK: - Mini-map row (shown while zoomed: zoom controls + context + drag-to-pan)
+    // MARK: - Mini-map row (shown while zoomed: fit button + context + drag-to-pan)
 
     @ViewBuilder
     private var miniMapRow: some View {
         if visibleKmRange != nil, maxKm > 0 {
-            HStack(spacing: 8) {
-                headerButton("minus.magnifyingglass", action: resetZoom)
+            HStack(spacing: 0) {
+                headerButton(
+                    "arrow.up.left.and.arrow.down.right", label: "Afficher tout l'itinéraire",
+                    action: resetZoom)
                 miniMapStrip
             }
         }
     }
 
+    /// The strip draws thin but the whole 40 pt row accepts touches.
     private var miniMapStrip: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
+            let bandHeight: CGFloat = 18
+            let bandTop = (geometry.size.height - bandHeight) / 2
             ZStack(alignment: .topLeading) {
+                Color.clear
                 MiniProfilePath(profile: displayProfile, maxDistance: linearized.totalDistance)
                     .stroke(Color.secondary.opacity(0.55), lineWidth: 1)
+                    .frame(height: bandHeight)
+                    .offset(y: bandTop)
+                // Navigation window: neutral color — orange is reserved for
+                // the measurement.
                 if let window = visibleKmRange {
                     let x0 = window.lowerBound / maxKm * width
                     let x1 = window.upperBound / maxKm * width
                     RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.orange.opacity(0.18))
-                        .strokeBorder(Color.orange, lineWidth: 1)
-                        .frame(width: max(10, x1 - x0), height: geometry.size.height)
-                        .offset(x: x0)
+                        .fill(Color.primary.opacity(0.08))
+                        .strokeBorder(Color.secondary, lineWidth: 1)
+                        .frame(width: max(10, x1 - x0), height: bandHeight)
+                        .offset(x: x0, y: bandTop)
+                }
+                // Measurement, if any, so it stays locatable when offscreen.
+                if let selection = selectedKmRange {
+                    let x0 = selection.lowerBound / maxKm * width
+                    let x1 = selection.upperBound / maxKm * width
+                    Rectangle()
+                        .fill(Color.orange.opacity(0.7))
+                        .frame(width: max(2, x1 - x0), height: 3)
+                        .offset(x: x0, y: bandTop + bandHeight + 1)
+                }
+                // GPS position tick.
+                if let currentKm, maxKm > 0 {
+                    Rectangle()
+                        .fill(positionIsOnTrack ? Color.blue : Color.gray)
+                        .frame(width: 2, height: bandHeight)
+                        .offset(x: currentKm / maxKm * width - 1, y: bandTop)
                 }
             }
             .contentShape(Rectangle())
@@ -220,7 +252,7 @@ struct ElevationProfileView: View {
                     }
             )
         }
-        .frame(height: 18)
+        .frame(height: 40)
     }
 
     // MARK: - Chart overlay (measurement visuals + navigation gestures)
@@ -260,13 +292,37 @@ struct ElevationProfileView: View {
                         edgeMarker(atX: rawX1 - 1.5, plot: plotFrame)
                     }
                 }
+                // Offscreen measurement indicator at the relevant edge.
+                if rawX1 < plotFrame.minX {
+                    edgeIndicator("chevron.left", color: .orange, x: plotFrame.minX + 12, plot: plotFrame)
+                } else if rawX0 > plotFrame.maxX {
+                    edgeIndicator("chevron.right", color: .orange, x: plotFrame.maxX - 12, plot: plotFrame)
+                }
+            }
+            // Offscreen GPS indicator.
+            if let currentKm, plotFrame.width > 0, !visibleDomain.contains(currentKm) {
+                let positionColor: Color = positionIsOnTrack ? .blue : .gray
+                if currentKm < visibleDomain.lowerBound {
+                    edgeIndicator(
+                        "location.fill", color: positionColor, x: plotFrame.minX + 12,
+                        plot: plotFrame, verticalFraction: 0.25)
+                } else {
+                    edgeIndicator(
+                        "location.fill", color: positionColor, x: plotFrame.maxX - 12,
+                        plot: plotFrame, verticalFraction: 0.25)
+                }
+            }
+            if isArmed {
+                hintCapsule("Glissez sur le profil pour mesurer", plot: plotFrame)
+            } else if showsPanHint {
+                hintCapsule("Pincez ou touchez deux fois pour zoomer", plot: plotFrame)
             }
         }
         .contentShape(Rectangle())
         .gesture(dragGesture(plot: plotFrame))
         .simultaneousGesture(doubleTapGesture(plot: plotFrame))
         .simultaneousGesture(magnifyGesture(plot: plotFrame))
-        .simultaneousGesture(longPressGesture(plot: plotFrame))
+        .simultaneousGesture(longPressGesture())
     }
 
     @ViewBuilder
@@ -282,15 +338,39 @@ struct ElevationProfileView: View {
             .offset(x: x - 6, y: plotFrame.midY - 6.5)
     }
 
-    /// Drag = adjust a handle when it starts on one, otherwise PAN the window.
+    private func edgeIndicator(
+        _ systemName: String, color: Color, x: CGFloat, plot plotFrame: CGRect,
+        verticalFraction: CGFloat = 0.5
+    ) -> some View {
+        Image(systemName: systemName)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(color)
+            .padding(4)
+            .background(.regularMaterial, in: Circle())
+            .position(x: x, y: plotFrame.minY + plotFrame.height * verticalFraction)
+    }
+
+    private func hintCapsule(_ text: String, plot plotFrame: CGRect) -> some View {
+        Text(text)
+            .font(.caption2)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.regularMaterial, in: Capsule())
+            .position(x: plotFrame.midX, y: plotFrame.minY + 16)
+    }
+
+    /// Drag = define (when armed), adjust a handle (when starting on one),
+    /// otherwise PAN the window. Navigation never edits the measurement.
     private func dragGesture(plot plotFrame: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 4)
             .onChanged { drag in
-                guard plotFrame.width > 0, maxKm > 0, pinchStart == nil, !longPressCreated
-                else { return }
+                guard plotFrame.width > 0, maxKm > 0, pinchStart == nil else { return }
 
                 if dragMode == nil {
-                    if let selection = selectedKmRange,
+                    if isArmed {
+                        dragMode = .defining
+                        defineAnchorKm = xToKm(drag.startLocation.x, plot: plotFrame)
+                    } else if let selection = selectedKmRange,
                         abs(drag.startLocation.x - kmToX(selection.lowerBound, plot: plotFrame))
                             < Self.handleGrabWidth
                     {
@@ -303,10 +383,21 @@ struct ElevationProfileView: View {
                     } else {
                         dragMode = .panning
                         panConsumedX = 0
+                        if visibleKmRange == nil {
+                            flashPanHint()
+                        }
                     }
                 }
 
                 switch dragMode {
+                case .defining:
+                    guard let anchor = defineAnchorKm else { return }
+                    let current = xToKm(drag.location.x, plot: plotFrame)
+                    let low = min(anchor, current)
+                    let high = max(anchor, current)
+                    if high - low > 0.02 {
+                        selectedKmRange = low...high
+                    }
                 case .adjustLower:
                     if let selection = selectedKmRange {
                         let newLower = min(
@@ -326,7 +417,12 @@ struct ElevationProfileView: View {
                 }
             }
             .onEnded { _ in
+                // Single-use mode: definition mode exits once a range exists.
+                if dragMode == .defining, selectedKmRange != nil {
+                    isArmed = false
+                }
                 dragMode = nil
+                defineAnchorKm = nil
                 panConsumedX = 0
             }
     }
@@ -349,8 +445,18 @@ struct ElevationProfileView: View {
         setZoom(lower...(lower + span))
     }
 
+    private func flashPanHint() {
+        guard !panHintShown else { return }
+        panHintShown = true
+        showsPanHint = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2.5))
+            showsPanHint = false
+        }
+    }
+
     /// Double-tap zooms in 2× at the tap point (map grammar). Zooming out is
-    /// pinch-out, the ⊖ button, or the mini-map.
+    /// pinch-out, the fit button, or the mini-map.
     private func doubleTapGesture(plot plotFrame: CGRect) -> some Gesture {
         SpatialTapGesture(count: 2)
             .onEnded { tap in
@@ -364,23 +470,13 @@ struct ElevationProfileView: View {
             }
     }
 
-    /// Long-press places a measurement at the pressed spot (like dropping a
-    /// pin on the map). The ruler button does the same at the window center.
-    private func longPressGesture(plot plotFrame: CGRect) -> some Gesture {
+    /// Long-press arms measurement definition (haptic); the same touch can
+    /// then drag to define the range in one gesture. Releasing without
+    /// dragging leaves the mode armed — it never invents a range.
+    private func longPressGesture() -> some Gesture {
         LongPressGesture(minimumDuration: 0.35)
-            .sequenced(before: DragGesture(minimumDistance: 0))
-            .onChanged { value in
-                guard case .second(true, let drag?) = value, !longPressCreated,
-                    plotFrame.width > 0
-                else { return }
-                longPressCreated = true
-                createMeasurement(atKm: xToKm(drag.startLocation.x, plot: plotFrame))
-            }
-            .onEnded { value in
-                if case .second(true, let drag?) = value, !longPressCreated, plotFrame.width > 0 {
-                    createMeasurement(atKm: xToKm(drag.startLocation.x, plot: plotFrame))
-                }
-                longPressCreated = false
+            .onEnded { _ in
+                arm()
             }
     }
 
@@ -429,71 +525,87 @@ struct ElevationProfileView: View {
     }
 
     // MARK: - Header
+    //
+    // Stable slots: [title] [spacer] [scope-labeled stats] [recovery?] [ruler|✕].
+    // The trailing slot always exists (ruler without a measurement, ✕ with one)
+    // so the header never feels jumpy.
 
     @ViewBuilder
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            if let selection = selectedKmRange {
-                Text("Mesure")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.orange)
-                Spacer()
-                Text(summary(for: selection))
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                if canZoomToSelection {
-                    headerButton("plus.magnifyingglass", action: zoomToSelection)
+        HStack(alignment: .center, spacing: 0) {
+            Group {
+                if selectedKmRange != nil {
+                    Text("Mesure")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.orange)
+                } else if let window = visibleKmRange {
+                    Text("\(kmLabel(window.lowerBound)) – \(kmLabel(window.upperBound)) km")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(name ?? "Trace")
+                        .font(.footnote.weight(.semibold))
                 }
-                headerButton("xmark.circle.fill") {
+            }
+            .lineLimit(1)
+
+            Spacer(minLength: 8)
+
+            Text(scopedSummary)
+                .font(.footnote.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+
+            if measurementIsOffscreen {
+                headerButton("viewfinder", label: "Afficher la mesure", action: showMeasurement)
+            }
+
+            if selectedKmRange != nil {
+                headerButton("xmark.circle.fill", label: "Supprimer la mesure") {
                     selectedKmRange = nil
                 }
-            } else if let window = visibleKmRange {
-                // Zoomed without a measurement: the header describes the
-                // visible window, so the numbers always match the chart.
-                Text("\(kmLabel(window.lowerBound)) – \(kmLabel(window.upperBound)) km")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer()
-                Text(summary(for: window))
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                headerButton("ruler") {
-                    let window = visibleDomain
-                    createMeasurement(atKm: (window.lowerBound + window.upperBound) / 2)
-                }
             } else {
-                Text(name ?? "Trace")
-                    .font(.footnote.weight(.semibold))
-                    .lineLimit(1)
-                Spacer()
-                Text(summary(for: nil))
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                headerButton("ruler") {
-                    let window = visibleDomain
-                    createMeasurement(atKm: (window.lowerBound + window.upperBound) / 2)
+                headerButton("ruler", label: "Mesurer", tint: isArmed ? .orange : nil) {
+                    if isArmed {
+                        isArmed = false
+                    } else {
+                        arm()
+                    }
                 }
             }
         }
+        .frame(height: 44)
+    }
+
+    /// Stats always carry their scope — numbers must never silently change
+    /// meaning between states. In measurement/window states the title already
+    /// names the scope; only the trace-name state needs the explicit prefix.
+    private var scopedSummary: String {
+        if let selection = selectedKmRange {
+            return summary(for: selection)
+        }
+        if let window = visibleKmRange {
+            return summary(for: window)
+        }
+        return "Total · \(summary(for: nil))"
     }
 
     private func kmLabel(_ km: Double) -> String {
         km.formatted(.number.precision(.fractionLength(1)))
     }
 
-    private func headerButton(_ systemName: String, action: @escaping () -> Void) -> some View {
+    private func headerButton(
+        _ systemName: String, label: String, tint: Color? = nil, action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(tint ?? Color.secondary)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 
     private func summary(for kmRange: ClosedRange<Double>?) -> String {

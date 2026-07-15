@@ -43,7 +43,6 @@ struct ContentView: View {
                     currentKm: currentProjection.map { ($0.distanceAlong / 25).rounded() * 25 / 1000 },
                     positionIsOnTrack: monitor.status == .onTrack
                 )
-                .frame(height: 200)
                 .padding(.horizontal, 10)
                 .padding(.bottom, 6)
             }
