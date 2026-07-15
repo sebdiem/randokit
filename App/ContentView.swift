@@ -38,9 +38,7 @@ struct ContentView: View {
                     displayProfile: active.displayProfile,
                     selectedKmRange: $selectedKmRange,
                     visibleKmRange: $visibleKmRange,
-                    // Quantized to 25 m so the chart (whose position marker is
-                    // a mark) doesn't re-render on every 5 m GPS fix.
-                    currentKm: currentProjection.map { ($0.distanceAlong / 25).rounded() * 25 / 1000 },
+                    currentKm: currentProjection.map { $0.distanceAlong / 1000 },
                     positionIsOnTrack: monitor.status == .onTrack
                 )
                 .padding(.horizontal, 10)

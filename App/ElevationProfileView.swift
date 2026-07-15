@@ -87,9 +87,7 @@ struct ElevationProfileView: View {
             StaticProfileChart(
                 points: visiblePoints,
                 xDomain: visibleDomain,
-                yDomain: elevationDomain,
-                currentKm: currentKm.flatMap { visibleDomain.contains($0) ? $0 : nil },
-                positionIsOnTrack: positionIsOnTrack
+                yDomain: elevationDomain
             )
             .equatable()
             .overlayPreferenceValue(PlotAnchorPreferenceKey.self) { anchor in
@@ -278,6 +276,13 @@ struct ElevationProfileView: View {
             domain.upperBound, Swift.max(domain.lowerBound, domain.lowerBound + fraction * span))
     }
 
+    private func yPosition(ofElevation elevation: Double, plot: CGRect) -> CGFloat {
+        let domain = elevationDomain
+        let span = domain.upperBound - domain.lowerBound
+        let fraction = span > 0 ? (elevation - domain.lowerBound) / span : 0
+        return plot.minY + (1 - fraction) * plot.height
+    }
+
     private func selectionOverlay(plot plotFrame: CGRect) -> some View {
         ZStack(alignment: .topLeading) {
             Color.clear
@@ -305,6 +310,20 @@ struct ElevationProfileView: View {
                 } else if rawX0 > plotFrame.maxX {
                     edgeIndicator("chevron.right", color: .orange, x: plotFrame.maxX - 12, plot: plotFrame)
                 }
+            }
+            // GPS position: a dot ON the curve at the projected km/elevation,
+            // same color semantics as the map dot. Drawn in the overlay so
+            // GPS fixes never invalidate the chart.
+            if let currentKm, plotFrame.width > 0, visibleDomain.contains(currentKm),
+                let elevation = linearized.elevation(atDistance: currentKm * 1000)
+            {
+                Circle()
+                    .fill(positionIsOnTrack ? Color.blue : Color.gray)
+                    .overlay(Circle().stroke(.white, lineWidth: 2))
+                    .frame(width: 12, height: 12)
+                    .offset(
+                        x: kmToX(currentKm, plot: plotFrame) - 6,
+                        y: yPosition(ofElevation: elevation, plot: plotFrame) - 6)
             }
             // Offscreen GPS indicator.
             if let currentKm, plotFrame.width > 0, !visibleDomain.contains(currentKm) {
@@ -713,8 +732,6 @@ private struct StaticProfileChart: View, Equatable {
     let points: [ProfilePoint]
     let xDomain: ClosedRange<Double>
     let yDomain: ClosedRange<Double>
-    let currentKm: Double?
-    let positionIsOnTrack: Bool
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.points.count == rhs.points.count
@@ -722,8 +739,6 @@ private struct StaticProfileChart: View, Equatable {
             && lhs.points.last == rhs.points.last
             && lhs.xDomain == rhs.xDomain
             && lhs.yDomain == rhs.yDomain
-            && lhs.currentKm == rhs.currentKm
-            && lhs.positionIsOnTrack == rhs.positionIsOnTrack
     }
 
     var body: some View {
@@ -750,11 +765,6 @@ private struct StaticProfileChart: View, Equatable {
                 .interpolationMethod(.monotone)
             }
 
-            if let currentKm {
-                RuleMark(x: .value("km", currentKm))
-                    .foregroundStyle(positionIsOnTrack ? Color.blue : Color.gray.opacity(0.6))
-                    .lineStyle(StrokeStyle(lineWidth: 2))
-            }
         }
         .chartXScale(domain: xDomain)
         .chartYScale(domain: yDomain)
