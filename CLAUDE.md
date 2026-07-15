@@ -1,0 +1,45 @@
+# Rando — offline hiking companion (iOS)
+
+Personal iPhone app: follow a GPX trace on offline IGN/OpenTopoMap tiles, live position vs trace,
+elevation profile (km × elevation) with two-point measurements, off-track shown by dot color.
+v1 is foreground-only Core Location; recording/stats and GPX editing are v2.
+
+## Hard rules
+
+- **Never install anything on this machine without explicit approval** (no Homebrew — it isn't installed).
+  Approved tooling lives repo-local in `tools/` (git-ignored).
+- The `.xcodeproj` is generated — never edit it, never commit it. Change `project.yml` and regenerate.
+
+## Layout
+
+- `project.yml` — XcodeGen project definition (source of truth)
+- `App/` — SwiftUI app shell (map UI, later: location service, tile store)
+- `Packages/RandoKit/` — pure-Swift domain package: GPX parse/write, linearization,
+  projection, stats. No UIKit/MapLibre imports allowed here. Fast native tests.
+- `tools/xcodegen/` — repo-local XcodeGen binary (git-ignored)
+
+## Commands
+
+```sh
+# Domain tests (fast, native macOS, no simulator needed)
+swift test --package-path Packages/RandoKit
+
+# Regenerate the Xcode project after adding/removing files or editing project.yml
+./tools/xcodegen/bin/xcodegen generate
+
+# Build for simulator
+xcodebuild -project Rando.xcodeproj -scheme Rando \
+  -destination 'platform=iOS Simulator,name=iPhone 16' build
+
+# Run in simulator
+xcrun simctl boot "iPhone 16" || true
+xcrun simctl install booted DerivedData/.../Rando.app
+xcrun simctl launch booted dev.seb.Rando
+
+# Deploy to Seb's iPhone (needs signing set up in Local.xcconfig, device in Developer Mode)
+xcrun devicectl list devices
+xcrun devicectl device install app --device <UDID> <path to Rando.app>
+```
+
+Simulator GPS: `simctl location <device> start|set` or a GPX-driven scenario — use for testing
+position-on-trace behavior headlessly.

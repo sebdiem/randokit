@@ -1,0 +1,38 @@
+name: Rando
+options:
+  bundleIdPrefix: dev.seb
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+packages:
+  RandoKit:
+    path: Packages/RandoKit
+  MapLibre:
+    url: https://github.com/maplibre/maplibre-gl-native-distribution
+    from: 6.0.0
+
+targets:
+  Rando:
+    type: application
+    platform: iOS
+    sources:
+      - App
+    dependencies:
+      - package: RandoKit
+      - package: MapLibre
+        product: MapLibre
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Rando
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSLocationWhenInUseUsageDescription: Rando shows your position on the map and along your hiking trace.
+        ITSAppUsesNonExemptEncryption: false
