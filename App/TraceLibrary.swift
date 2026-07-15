@@ -2,19 +2,32 @@ import Foundation
 import RandoKit
 
 extension Waypoint {
-    /// Overnight-stop convention: the GPX `<sym>` or `<type>` contains one of
-    /// these keywords (set them in gpx.studio, a text editor, …). The NAME is
-    /// deliberately not matched — "Refuge du Lac Blanc" as a plain POI must
-    /// not become a night stop by accident.
-    var isOvernightStop: Bool {
+    enum Category: Equatable {
+        case standard
+        case overnightStop
+        case waterSource
+    }
+
+    /// Category convention: the GPX `<sym>` or `<type>` contains a keyword
+    /// (set them in gpx.studio, a text editor, …). The NAME is deliberately
+    /// not matched — "Refuge du Lac Blanc" as a plain POI must not become a
+    /// night stop by accident.
+    var category: Category {
         let haystack = "\(symbol ?? "") \(type ?? "")".lowercased()
-        guard !haystack.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
-        let keywords = [
+        guard !haystack.trimmingCharacters(in: .whitespaces).isEmpty else { return .standard }
+        let overnight = [
             "campground", "camping", "camp", "tent", "bivouac", "bivy",
             "lodging", "hotel", "hut", "refuge", "gite", "gîte",
             "nuit", "night", "etape", "étape",
         ]
-        return keywords.contains { haystack.contains($0) }
+        if overnight.contains(where: { haystack.contains($0) }) {
+            return .overnightStop
+        }
+        let water = ["water", "eau", "fontaine", "fountain", "source", "spring"]
+        if water.contains(where: { haystack.contains($0) }) {
+            return .waterSource
+        }
+        return .standard
     }
 }
 
@@ -46,7 +59,7 @@ final class TraceLibrary: ObservableObject {
         let km: Double
         let latitude: Double
         let longitude: Double
-        let isOvernightStop: Bool
+        let category: Waypoint.Category
     }
 
     @Published private(set) var entries: [Entry] = []
@@ -80,14 +93,24 @@ final class TraceLibrary: ObservableObject {
         entries = result
     }
 
+    private var selectionGeneration = 0
+
     func select(_ entry: Entry) {
-        Task { await selectAsync(entry) }
+        selectionGeneration += 1
+        let generation = selectionGeneration
+        Task { await selectAsync(entry, generation: generation) }
     }
 
-    private func selectAsync(_ entry: Entry) async {
+    private func selectAsync(_ entry: Entry, generation: Int) async {
         // File IO, XML parsing, and the O(n) derived models stay off-main.
-        guard let loaded = await Task.detached(priority: .userInitiated, operation: { Self.load(entry) }).value
+        guard
+            let loaded = await Task.detached(
+                priority: .userInitiated, operation: { Self.load(entry) }
+            ).value
         else { return }
+        // Selections can race (slow big-trace load vs a quick import's
+        // select): only the LATEST requested selection may apply.
+        guard generation == selectionGeneration else { return }
         active = loaded
         UserDefaults.standard.set(entry.id, forKey: "activeTraceID")
     }
@@ -111,7 +134,7 @@ final class TraceLibrary: ObservableObject {
             return WaypointMark(
                 name: waypoint.name, km: projection.distanceAlong / 1000,
                 latitude: waypoint.latitude, longitude: waypoint.longitude,
-                isOvernightStop: waypoint.isOvernightStop)
+                category: waypoint.category)
         }
         return Active(
             entryID: entry.id,

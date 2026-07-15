@@ -296,7 +296,7 @@ struct ContentView: View {
                 elevation: active.linearized.elevation(atDistance: mark.km * 1000) ?? 0,
                 latitude: mark.latitude, longitude: mark.longitude,
                 name: mark.name,
-                isOvernightStop: mark.isOvernightStop)
+                category: mark.category)
             return
         }
 
@@ -330,16 +330,22 @@ struct ContentView: View {
             km: km, elevation: elevation,
             latitude: coordinate.latitude, longitude: coordinate.longitude,
             name: nearbyMark?.name,
-            isOvernightStop: nearbyMark?.isOvernightStop ?? false)
+            category: nearbyMark?.category ?? .standard)
     }
 
     private func tapInfoChip(_ info: TappedPointInfo) -> some View {
         HStack(spacing: 12) {
-            Image(
-                systemName: info.isOvernightStop
-                    ? "tent.fill" : (info.name != nil ? "mappin.circle.fill" : "scope")
-            )
-            .foregroundStyle(info.isOvernightStop ? Color.indigo : .purple)
+            Group {
+                switch info.category {
+                case .overnightStop:
+                    Image(systemName: "tent.fill").foregroundStyle(Color.indigo)
+                case .waterSource:
+                    Image(systemName: "drop.fill").foregroundStyle(Color.blue)
+                case .standard:
+                    Image(systemName: info.name != nil ? "mappin.circle.fill" : "scope")
+                        .foregroundStyle(Color.purple)
+                }
+            }
             VStack(alignment: .leading, spacing: 1) {
                 if let name = info.name {
                     Text(name)
@@ -477,7 +483,7 @@ struct TappedPointInfo: Equatable {
     let latitude: Double
     let longitude: Double
     let name: String?
-    var isOvernightStop = false
+    var category: Waypoint.Category = .standard
 }
 
 struct MapCameraCommand: Equatable {
@@ -728,9 +734,13 @@ struct MapView: UIViewRepresentable {
                 let feature = MLNPointFeature()
                 feature.coordinate = CLLocationCoordinate2D(
                     latitude: waypoint.latitude, longitude: waypoint.longitude)
-                feature.attributes = [
-                    "icon": waypoint.isOvernightStop ? "waypoint-night" : "waypoint-pin"
-                ]
+                let icon: String
+                switch waypoint.category {
+                case .overnightStop: icon = "waypoint-night"
+                case .waterSource: icon = "waypoint-water"
+                case .standard: icon = "waypoint-pin"
+                }
+                feature.attributes = ["icon": icon]
                 return feature
             }
             let shape = MLNShapeCollectionFeature(shapes: features)
@@ -742,6 +752,9 @@ struct MapView: UIViewRepresentable {
                 }
                 if let tent = Self.haloGlyphImage(symbol: "tent.fill", color: .systemIndigo) {
                     style.setImage(tent, forName: "waypoint-night")
+                }
+                if let drop = Self.haloGlyphImage(symbol: "drop.fill", color: .systemBlue) {
+                    style.setImage(drop, forName: "waypoint-water")
                 }
                 let source = MLNShapeSource(identifier: "waypoints", shape: shape)
                 style.addSource(source)
