@@ -6,3 +6,4 @@ App/Info.plist
 .build/
 xcuserdata/
 Local.xcconfig
+/screenshots/
