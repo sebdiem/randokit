@@ -185,29 +185,40 @@ final class TraceLibrary: ObservableObject {
         let (corrected, count) = await IGNElevationService().corrected(trace)
 
         let baseName = sanitized(corrected.name ?? "Trace")
+        let existingNames = Set(
+            (try? FileManager.default.contentsOfDirectory(atPath: documentsDirectory.path))?
+                .map(normalizedFileName) ?? [])
         var fileURL = documentsDirectory.appendingPathComponent("\(baseName).gpx")
         var suffix = 2
-        while FileManager.default.fileExists(atPath: fileURL.path) {
+        while existingNames.contains(normalizedFileName(fileURL.lastPathComponent)) {
             fileURL = documentsDirectory.appendingPathComponent("\(baseName)-\(suffix).gpx")
             suffix += 1
         }
         let content = GPXWriter().write(corrected)
         let destination = fileURL
-        let saved = await Task.detached {
-            (try? content.write(to: destination, atomically: true, encoding: .utf8)) != nil
+        let saveError = await Task.detached { () -> String? in
+            do {
+                // The destination is computed as unique above. Refuse to overwrite
+                // if another import creates the same file before this write starts.
+                try Data(content.utf8).write(to: destination, options: .withoutOverwriting)
+                return nil
+            } catch {
+                let nsError = error as NSError
+                return "\(error.localizedDescription) (\(nsError.domain) \(nsError.code))"
+            }
         }.value
-        guard saved else {
-            importMessage = "Échec de l'enregistrement"
+        guard let saveError else {
+            refresh()
+            if let entry = entries.first(where: { $0.id == fileURL.lastPathComponent }) {
+                select(entry)
+            }
+            importMessage = count > 0
+                ? "Importé — altitudes IGN corrigées (\(count) points)"
+                : "Importé — altitudes du fichier conservées"
             return
         }
-
-        refresh()
-        if let entry = entries.first(where: { $0.id == fileURL.lastPathComponent }) {
-            select(entry)
-        }
-        importMessage = count > 0
-            ? "Importé — altitudes IGN corrigées (\(count) points)"
-            : "Importé — altitudes du fichier conservées"
+        NSLog("RANDO GPX save failed: %@", saveError)
+        importMessage = "Échec de l'enregistrement : \(saveError)"
     }
 
     private var documentsDirectory: URL {
@@ -218,5 +229,9 @@ final class TraceLibrary: ObservableObject {
         let forbidden = CharacterSet(charactersIn: "/\\:?%*|\"<>")
         return String(name.unicodeScalars.map { forbidden.contains($0) ? "-" : Character($0) })
             .trimmingCharacters(in: .whitespaces)
+    }
+
+    private func normalizedFileName(_ name: String) -> String {
+        name.precomposedStringWithCanonicalMapping.lowercased()
     }
 }
