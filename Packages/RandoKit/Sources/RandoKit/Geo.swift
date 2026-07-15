@@ -36,6 +36,36 @@ public struct ProfilePoint: Equatable, Sendable {
 public struct LinearizedTrace: Equatable, Sendable {
     public var points: [ProfilePoint]
 
+    /// Peak-preserving reduction for display: buckets of equal point count,
+    /// keeping each bucket's min and max elevation. Charts stay visually
+    /// identical while mark count drops orders of magnitude. Never use the
+    /// result for measurements — keep the full-resolution trace for math.
+    public func downsampled(maxBuckets: Int = 500) -> [ProfilePoint] {
+        guard points.count > maxBuckets * 2, let last = points.last else { return points }
+        var result: [ProfilePoint] = [points[0]]
+        let bucketSize = Double(points.count - 2) / Double(maxBuckets)
+        for bucket in 0..<maxBuckets {
+            let start = 1 + Int(Double(bucket) * bucketSize)
+            let end = min(1 + Int(Double(bucket + 1) * bucketSize), points.count - 1)
+            guard start < end else { continue }
+            let slice = points[start..<end]
+            guard let lowest = slice.min(by: { $0.elevation < $1.elevation }),
+                let highest = slice.max(by: { $0.elevation < $1.elevation })
+            else { continue }
+            if lowest == highest {
+                result.append(lowest)
+            } else if lowest.distance < highest.distance {
+                result.append(lowest)
+                result.append(highest)
+            } else {
+                result.append(highest)
+                result.append(lowest)
+            }
+        }
+        result.append(last)
+        return result
+    }
+
     public var totalDistance: Double { points.last?.distance ?? 0 }
 
     /// Points missing elevation take the nearest earlier known value (or the first

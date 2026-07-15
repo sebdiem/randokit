@@ -4,13 +4,16 @@ import SwiftUI
 
 struct ElevationProfileView: View {
     let name: String?
+    /// Full resolution — all measurements come from here.
     let linearized: LinearizedTrace
+    /// Reduced point set for chart marks only.
+    let displayProfile: [ProfilePoint]
     @Binding var selectedKmRange: ClosedRange<Double>?
     var currentKm: Double?
     var positionIsOnTrack = false
 
     private var elevationDomain: ClosedRange<Double> {
-        let elevations = linearized.points.map(\.elevation)
+        let elevations = displayProfile.map(\.elevation)
         guard let min = elevations.min(), let max = elevations.max() else {
             return 0...1000
         }
@@ -28,7 +31,7 @@ struct ElevationProfileView: View {
             header
 
             Chart {
-                ForEach(Array(linearized.points.enumerated()), id: \.offset) { _, point in
+                ForEach(Array(displayProfile.enumerated()), id: \.offset) { _, point in
                     AreaMark(
                         x: .value("km", point.distance / 1000),
                         yStart: .value("m", elevationDomain.lowerBound),

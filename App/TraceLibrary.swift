@@ -16,6 +16,8 @@ final class TraceLibrary: ObservableObject {
         let entryID: String
         let trace: GPXTrace
         let linearized: LinearizedTrace
+        /// Reduced profile for chart rendering only — measurements use `linearized`.
+        let displayProfile: [ProfilePoint]
         let projector: TraceProjector
     }
 
@@ -70,10 +72,12 @@ final class TraceLibrary: ObservableObject {
             trace = SampleTrace.trace
         }
         guard let trace, trace.points.count >= 2 else { return nil }
+        let linearized = LinearizedTrace(trackPoints: trace.points)
         return Active(
             entryID: entry.id,
             trace: trace,
-            linearized: LinearizedTrace(trackPoints: trace.points),
+            linearized: linearized,
+            displayProfile: linearized.downsampled(),
             projector: TraceProjector(trace: trace))
     }
 

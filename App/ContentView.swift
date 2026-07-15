@@ -34,6 +34,7 @@ struct ContentView: View {
             if let active = library.active {
                 ElevationProfileView(
                     name: active.trace.name, linearized: active.linearized,
+                    displayProfile: active.displayProfile,
                     selectedKmRange: $selectedKmRange,
                     currentKm: currentProjection.map { $0.distanceAlong / 1000 },
                     positionIsOnTrack: monitor.status == .onTrack
@@ -206,8 +207,16 @@ struct ContentView: View {
             selectionCoordinates = []
             return
         }
-        selectionCoordinates = projector
+        var slice = projector
             .sliceCoordinates(in: (kmRange.lowerBound * 1000)...(kmRange.upperBound * 1000))
+        // The overlay is redrawn on every drag tick — cap its point count
+        // (visually indistinguishable, keeps long-trace drags fluid).
+        let maxOverlayPoints = 800
+        if slice.count > maxOverlayPoints, let last = slice.last {
+            let stride = Double(slice.count) / Double(maxOverlayPoints)
+            slice = (0..<maxOverlayPoints).map { slice[Int(Double($0) * stride)] } + [last]
+        }
+        selectionCoordinates = slice
             .map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
     }
 

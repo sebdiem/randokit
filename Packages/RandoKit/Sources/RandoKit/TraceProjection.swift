@@ -110,7 +110,8 @@ public struct TraceProjector: Sendable {
         guard let first = trackPoints.first, let last = trackPoints.last else { return nil }
         if distance <= 0 { return (first.latitude, first.longitude) }
         if distance >= totalDistance { return (last.latitude, last.longitude) }
-        guard let upper = cumulativeDistances.firstIndex(where: { $0 >= distance }), upper > 0
+        let upper = cumulativeDistances.partitionIndex { $0 >= distance }
+        guard upper > 0, upper < cumulativeDistances.count
         else { return (first.latitude, first.longitude) }
         let lower = upper - 1
         let span = cumulativeDistances[upper] - cumulativeDistances[lower]
@@ -134,11 +135,10 @@ public struct TraceProjector: Sendable {
         if let start = coordinate(atDistance: range.lowerBound) {
             result.append(start)
         }
-        for (index, point) in trackPoints.enumerated()
-        where cumulativeDistances[index] > range.lowerBound
-            && cumulativeDistances[index] < range.upperBound
-        {
-            result.append((point.latitude, point.longitude))
+        let lower = cumulativeDistances.partitionIndex { $0 > range.lowerBound }
+        let upper = cumulativeDistances.partitionIndex { $0 >= range.upperBound }
+        if lower < upper {
+            result += trackPoints[lower..<upper].map { ($0.latitude, $0.longitude) }
         }
         if let end = coordinate(atDistance: range.upperBound) {
             result.append(end)

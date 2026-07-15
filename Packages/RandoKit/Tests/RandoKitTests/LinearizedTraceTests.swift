@@ -34,4 +34,34 @@ struct LinearizedTraceTests {
         #expect(trace.points.isEmpty)
         #expect(trace.totalDistance == 0)
     }
+
+    @Test func downsamplingPreservesExtremesAndEndpoints() {
+        // 8000 points with a single sharp spike and dip hidden in the noise.
+        var points: [TrackPoint] = []
+        for i in 0..<8000 {
+            var elevation = 1000.0 + Double(i % 7)
+            if i == 3210 { elevation = 2500 }
+            if i == 6100 { elevation = 400 }
+            points.append(
+                TrackPoint(latitude: 45 + Double(i) * 0.0001, longitude: 6, elevation: elevation))
+        }
+        let full = LinearizedTrace(trackPoints: points)
+        let reduced = full.downsampled(maxBuckets: 500)
+
+        #expect(reduced.count <= 1002)
+        #expect(reduced.count > 400)
+        #expect(reduced.map(\.elevation).max() == 2500)
+        #expect(reduced.map(\.elevation).min() == 400)
+        #expect(reduced.first == full.points.first)
+        #expect(reduced.last == full.points.last)
+        // Still sorted by distance so the chart renders a valid path.
+        #expect(zip(reduced, reduced.dropFirst()).allSatisfy { $0.distance <= $1.distance })
+    }
+
+    @Test func downsamplingLeavesSmallTracesUntouched() {
+        let trace = LinearizedTrace(trackPoints: (0..<100).map {
+            TrackPoint(latitude: 45 + Double($0) * 0.001, longitude: 6, elevation: 1000)
+        })
+        #expect(trace.downsampled(maxBuckets: 500) == trace.points)
+    }
 }
