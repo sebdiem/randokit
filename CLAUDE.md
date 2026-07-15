@@ -13,9 +13,11 @@ v1 is foreground-only Core Location; recording/stats and GPX editing are v2.
 ## Layout
 
 - `project.yml` — XcodeGen project definition (source of truth)
-- `App/` — SwiftUI app shell (map UI, later: location service, tile store)
-- `Packages/RandoKit/` — pure-Swift domain package: GPX parse/write, linearization,
-  projection, stats. No UIKit/MapLibre imports allowed here. Fast native tests.
+- `App/` — SwiftUI and MapLibre adapters, navigation session, import use case, persistence,
+  location/elevation/tile services
+- `Packages/RandoKit/` — pure-Swift domain package: GPX parse/write, canonical segment-aware
+  geometry, projection, and stats. No UIKit/MapLibre imports allowed here. Fast native tests.
+- `Tests/RandoTests/` — iOS integration/unit tests for app-layer actors and sessions
 - `tools/xcodegen/` — repo-local XcodeGen binary (git-ignored)
 
 ## Commands
@@ -26,6 +28,12 @@ swift test --package-path Packages/RandoKit
 
 # Regenerate the Xcode project after adding/removing files or editing project.yml
 ./tools/xcodegen/bin/xcodegen generate
+
+# App-layer tests (build once, then run on a booted simulator)
+xcodebuild -project Rando.xcodeproj -scheme Rando \
+  -destination 'platform=iOS Simulator,name=iPhone 16' build-for-testing
+xcodebuild -project Rando.xcodeproj -scheme Rando \
+  -destination 'platform=iOS Simulator,name=iPhone 16' test-without-building
 
 # Build for simulator
 xcodebuild -project Rando.xcodeproj -scheme Rando \

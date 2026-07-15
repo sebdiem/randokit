@@ -739,7 +739,8 @@ private struct StaticProfileChart: View, Equatable {
                 AreaMark(
                     x: .value("km", points[index].distance / 1000),
                     yStart: .value("m", yDomain.lowerBound),
-                    yEnd: .value("m", points[index].elevation)
+                    yEnd: .value("m", points[index].elevation),
+                    series: .value("Segment", points[index].segmentIndex)
                 )
                 .foregroundStyle(
                     .linearGradient(
@@ -750,7 +751,8 @@ private struct StaticProfileChart: View, Equatable {
 
                 LineMark(
                     x: .value("km", points[index].distance / 1000),
-                    y: .value("m", points[index].elevation)
+                    y: .value("m", points[index].elevation),
+                    series: .value("Segment", points[index].segmentIndex)
                 )
                 .foregroundStyle(.purple)
                 .lineStyle(StrokeStyle(lineWidth: 2))
@@ -803,8 +805,14 @@ private struct MiniProfilePath: Shape {
                 y: rect.maxY - (p.elevation - minElevation) / (maxElevation - minElevation) * rect.height)
         }
         path.move(to: point(profile[0]))
-        for p in profile.dropFirst() {
-            path.addLine(to: point(p))
+        var previousSegment = profile[0].segmentIndex
+        for profilePoint in profile.dropFirst() {
+            if profilePoint.segmentIndex == previousSegment {
+                path.addLine(to: point(profilePoint))
+            } else {
+                path.move(to: point(profilePoint))
+                previousSegment = profilePoint.segmentIndex
+            }
         }
         return path
     }

@@ -2,7 +2,7 @@ import Foundation
 import RandoKit
 
 extension Waypoint {
-    enum Category: Equatable {
+    enum Category: Equatable, Sendable {
         case standard
         case overnightStop
         case waterSource
@@ -36,25 +36,23 @@ extension Waypoint {
 /// everything the UI needs (linearization, projector).
 @MainActor
 final class TraceLibrary: ObservableObject {
-    struct Entry: Identifiable, Equatable {
-        let id: String
-        let name: String
-        let url: URL?
-    }
+    typealias Entry = TraceEntry
 
-    struct Active {
+    struct Active: Sendable {
         let entryID: String
-        let trace: GPXTrace
-        let linearized: LinearizedTrace
+        let prepared: PreparedTrace
         /// Reduced profile for chart rendering only — measurements use `linearized`.
         let displayProfile: [ProfilePoint]
-        let projector: TraceProjector
         /// GPX waypoints projected onto the trace (those within 250 m of it),
         /// for name lookups and on-profile placement.
         let waypointMarks: [WaypointMark]
+
+        var trace: GPXTrace { prepared.trace }
+        var linearized: LinearizedTrace { prepared.linearized }
+        var projector: TraceProjector { prepared.projector }
     }
 
-    struct WaypointMark: Equatable {
+    struct WaypointMark: Equatable, Sendable {
         let name: String?
         let km: Double
         let latitude: Double
@@ -67,67 +65,77 @@ final class TraceLibrary: ObservableObject {
     @Published private(set) var isImporting = false
     @Published var importMessage: String?
 
-    private static let sampleID = "sample"
-
-    init() {
-        refresh()
-        let lastID = UserDefaults.standard.string(forKey: "activeTraceID") ?? Self.sampleID
-        select(entries.first { $0.id == lastID } ?? entries[0])
-    }
-
-    func refresh() {
-        var result = [Entry(id: Self.sampleID, name: "Exemple : La Flégère → Lac Blanc", url: nil)]
-        if let files = try? FileManager.default.contentsOfDirectory(
-            at: documentsDirectory, includingPropertiesForKeys: nil)
-        {
-            let gpxFiles = files
-                .filter { $0.pathExtension.lowercased() == "gpx" }
-                .sorted { $0.lastPathComponent < $1.lastPathComponent }
-            result += gpxFiles.map {
-                Entry(
-                    id: $0.lastPathComponent,
-                    name: $0.deletingPathExtension().lastPathComponent,
-                    url: $0)
-            }
+    private actor PreparationService {
+        func prepare(entryID: String, trace: GPXTrace) -> Active? {
+            TraceLibrary.prepare(entryID: entryID, trace: trace)
         }
-        entries = result
     }
 
-    private var selectionGeneration = 0
+    private let repository: TraceRepository
+    private let importer: TraceImporter
+    private let preparationService = PreparationService()
+    private var initializationTask: Task<Void, Never>?
+    private var selectionTask: Task<Void, Never>?
+    private var importTask: Task<Void, Never>?
+    private var deletionTask: Task<Void, Never>?
+
+    init(
+        repository: TraceRepository? = nil,
+        elevationService: IGNElevationService = IGNElevationService()
+    ) {
+        let repository = repository ?? TraceRepository()
+        self.repository = repository
+        importer = TraceImporter(
+            repository: repository, elevationService: elevationService)
+        initializationTask = Task { [weak self] in
+            await self?.initialize()
+        }
+    }
+
+    private func initialize() async {
+        do {
+            entries = try await repository.entries()
+            let lastID = UserDefaults.standard.string(forKey: "activeTraceID")
+                ?? TraceRepository.sampleID
+            if let entry = entries.first(where: { $0.id == lastID }) ?? entries.first {
+                select(entry)
+            }
+        } catch {
+            importMessage = error.localizedDescription
+        }
+    }
+
+    private func refreshEntries() async throws {
+        entries = try await repository.entries()
+    }
 
     func select(_ entry: Entry) {
-        selectionGeneration += 1
-        let generation = selectionGeneration
-        Task { await selectAsync(entry, generation: generation) }
-    }
-
-    private func selectAsync(_ entry: Entry, generation: Int) async {
-        // File IO, XML parsing, and the O(n) derived models stay off-main.
-        guard
-            let loaded = await Task.detached(
-                priority: .userInitiated, operation: { Self.load(entry) }
-            ).value
-        else { return }
-        // Selections can race (slow big-trace load vs a quick import's
-        // select): only the LATEST requested selection may apply.
-        guard generation == selectionGeneration else { return }
-        active = loaded
-        UserDefaults.standard.set(entry.id, forKey: "activeTraceID")
-    }
-
-    private nonisolated static func load(_ entry: Entry) -> Active? {
-        let trace: GPXTrace?
-        if let url = entry.url {
-            trace = (try? Data(contentsOf: url)).flatMap { try? GPXParser().parse($0) }
-        } else {
-            trace = SampleTrace.trace
+        selectionTask?.cancel()
+        selectionTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let trace = try await repository.load(entry)
+                try Task.checkCancellation()
+                guard let loaded = await preparationService.prepare(
+                    entryID: entry.id, trace: trace)
+                else { return }
+                try Task.checkCancellation()
+                active = loaded
+                UserDefaults.standard.set(entry.id, forKey: "activeTraceID")
+            } catch is CancellationError {
+                return
+            } catch {
+                importMessage = error.localizedDescription
+            }
         }
-        guard let trace, trace.points.count >= 2 else { return nil }
-        let linearized = LinearizedTrace(trackPoints: trace.points)
-        let projector = TraceProjector(trace: trace)
+    }
+
+    private nonisolated static func prepare(entryID: String, trace: GPXTrace) -> Active? {
+        guard trace.points.count >= 2 else { return nil }
+        let prepared = PreparedTrace(trace: trace)
         let marks = trace.waypoints.compactMap { waypoint -> WaypointMark? in
             guard
-                let projection = projector.project(
+                let projection = prepared.projector.project(
                     latitude: waypoint.latitude, longitude: waypoint.longitude),
                 projection.crossTrackDistance < 250
             else { return nil }
@@ -137,101 +145,67 @@ final class TraceLibrary: ObservableObject {
                 category: waypoint.category)
         }
         return Active(
-            entryID: entry.id,
-            trace: trace,
-            linearized: linearized,
-            displayProfile: linearized.downsampled(),
-            projector: projector,
+            entryID: entryID,
+            prepared: prepared,
+            displayProfile: prepared.linearized.downsampled(),
             waypointMarks: marks)
     }
 
     /// Loads a trace without selecting it (e.g. to download its tiles).
     func loadTrace(for entry: Entry) async -> GPXTrace? {
-        await Task.detached(priority: .userInitiated) { Self.load(entry)?.trace }.value
+        try? await repository.load(entry)
     }
 
     /// Deletes a file-backed trace; falls back to the first entry if it was active.
     func delete(_ entry: Entry) {
-        guard let url = entry.url else { return }
-        try? FileManager.default.removeItem(at: url)
-        refresh()
-        if active?.entryID == entry.id, let first = entries.first {
-            select(first)
+        guard entry.url != nil, deletionTask == nil else { return }
+        deletionTask = Task { [weak self] in
+            guard let self else { return }
+            defer { deletionTask = nil }
+            do {
+                try await repository.delete(entry)
+                try await refreshEntries()
+                if active?.entryID == entry.id, let first = entries.first {
+                    select(first)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                importMessage = "Échec de la suppression : \(error.localizedDescription)"
+            }
         }
     }
 
     /// Full import pipeline: read → parse → correct elevations against the
     /// IGN DEM (best effort) → persist as GPX in Documents → select.
-    func importGPX(from url: URL) async {
+    func importGPX(from url: URL) {
+        guard importTask == nil else { return }
         isImporting = true
-        defer { isImporting = false }
-
-        let parsed = await Task.detached(priority: .userInitiated) { () -> GPXTrace? in
-            let secured = url.startAccessingSecurityScopedResource()
+        importTask = Task { [weak self] in
+            guard let self else { return }
             defer {
-                if secured { url.stopAccessingSecurityScopedResource() }
+                isImporting = false
+                importTask = nil
             }
-            guard let data = try? Data(contentsOf: url) else { return nil }
-            return try? GPXParser().parse(data)
-        }.value
-        guard var trace = parsed else {
-            importMessage = "Fichier GPX illisible"
-            return
-        }
-        if trace.name == nil {
-            trace.name = url.deletingPathExtension().lastPathComponent
-        }
-
-        let (corrected, count) = await IGNElevationService().corrected(trace)
-
-        let baseName = sanitized(corrected.name ?? "Trace")
-        let existingNames = Set(
-            (try? FileManager.default.contentsOfDirectory(atPath: documentsDirectory.path))?
-                .map(normalizedFileName) ?? [])
-        var fileURL = documentsDirectory.appendingPathComponent("\(baseName).gpx")
-        var suffix = 2
-        while existingNames.contains(normalizedFileName(fileURL.lastPathComponent)) {
-            fileURL = documentsDirectory.appendingPathComponent("\(baseName)-\(suffix).gpx")
-            suffix += 1
-        }
-        let content = GPXWriter().write(corrected)
-        let destination = fileURL
-        let saveError = await Task.detached { () -> String? in
             do {
-                // The destination is computed as unique above. Refuse to overwrite
-                // if another import creates the same file before this write starts.
-                try Data(content.utf8).write(to: destination, options: .withoutOverwriting)
-                return nil
+                let result = try await importer.importGPX(from: url)
+                try await refreshEntries()
+                if let entry = entries.first(where: { $0.id == result.entry.id }) {
+                    select(entry)
+                }
+                importMessage = result.correctedPointCount > 0
+                    ? "Importé — altitudes IGN corrigées (\(result.correctedPointCount) points)"
+                    : "Importé — altitudes du fichier conservées"
+            } catch is CancellationError {
+                return
             } catch {
-                let nsError = error as NSError
-                return "\(error.localizedDescription) (\(nsError.domain) \(nsError.code))"
+                NSLog("RANDO GPX import failed: %@", error.localizedDescription)
+                importMessage = "Échec de l’import : \(error.localizedDescription)"
             }
-        }.value
-        guard let saveError else {
-            refresh()
-            if let entry = entries.first(where: { $0.id == fileURL.lastPathComponent }) {
-                select(entry)
-            }
-            importMessage = count > 0
-                ? "Importé — altitudes IGN corrigées (\(count) points)"
-                : "Importé — altitudes du fichier conservées"
-            return
         }
-        NSLog("RANDO GPX save failed: %@", saveError)
-        importMessage = "Échec de l'enregistrement : \(saveError)"
     }
 
-    private var documentsDirectory: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-    }
-
-    private func sanitized(_ name: String) -> String {
-        let forbidden = CharacterSet(charactersIn: "/\\:?%*|\"<>")
-        return String(name.unicodeScalars.map { forbidden.contains($0) ? "-" : Character($0) })
-            .trimmingCharacters(in: .whitespaces)
-    }
-
-    private func normalizedFileName(_ name: String) -> String {
-        name.precomposedStringWithCanonicalMapping.lowercased()
+    func cancelImport() {
+        importTask?.cancel()
     }
 }

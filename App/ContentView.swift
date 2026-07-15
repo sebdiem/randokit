@@ -8,33 +8,28 @@ struct ContentView: View {
     @StateObject private var library = TraceLibrary()
     @StateObject private var downloader = CorridorDownloader()
     @StateObject private var location = LocationService()
-    @State private var selectedKmRange: ClosedRange<Double>?
-    @State private var monitor = OffTrackMonitor()
-    @State private var currentProjection: TraceProjection?
+    @StateObject private var session = NavigationSession()
     @State private var showsTracePicker = false
     @State private var showsFileImporter = false
-    @State private var selectionCoordinates: [CLLocationCoordinate2D] = []
-    @State private var visibleKmRange: ClosedRange<Double>?
     @State private var cameraCommand: MapCameraCommand?
     @State private var profileCardHeight: CGFloat = 0
-    @State private var tappedPoint: TappedPointInfo?
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
             MapView(
                 tileSource: .withID(tileSourceID),
-                trace: library.active?.trace,
-                waypoints: library.active?.trace.waypoints ?? [],
-                traceKey: library.active?.entryID ?? "none",
-                selectionCoordinates: selectionCoordinates,
+                trace: session.active?.trace,
+                waypoints: session.active?.trace.waypoints ?? [],
+                traceKey: session.active?.entryID ?? "none",
+                selectionCoordinateSegments: session.selectionCoordinateSegments,
                 positionCoordinate: location.lastFix?.coordinate,
                 positionColor: positionColor,
                 cameraCommand: cameraCommand,
                 bottomOverlayInset: profileCardHeight + 40,
-                tappedCoordinate: tappedPoint.map {
+                tappedCoordinate: session.tappedPoint.map {
                     CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
                 },
-                onMapTap: handleMapTap
+                onMapTap: session.handleMapTap
             )
             .ignoresSafeArea()
 
@@ -42,22 +37,22 @@ struct ContentView: View {
                 .padding(.trailing, 12)
         }
         .overlay(alignment: .bottom) {
-            if let tapped = tappedPoint {
+            if let tapped = session.tappedPoint {
                 tapInfoChip(tapped)
                     .padding(.bottom, profileCardHeight + 14)
             }
         }
         .overlay(alignment: .bottom) {
-            if let active = library.active {
+            if let active = session.active {
                 ElevationProfileView(
                     name: active.trace.name, linearized: active.linearized,
                     displayProfile: active.displayProfile,
-                    selectedKmRange: $selectedKmRange,
-                    visibleKmRange: $visibleKmRange,
-                    currentKm: currentProjection.map { $0.distanceAlong / 1000 },
-                    positionIsOnTrack: monitor.status == .onTrack,
-                    tappedKm: tappedPoint?.km,
-                    onTap: { selectPoint(atKm: $0) }
+                    selectedKmRange: $session.selectedKmRange,
+                    visibleKmRange: $session.visibleKmRange,
+                    currentKm: session.currentProjection.map { $0.distanceAlong / 1000 },
+                    positionIsOnTrack: session.offTrackStatus == .onTrack,
+                    tappedKm: session.tappedPoint?.km,
+                    onTap: session.selectPoint
                 )
                 .padding(.horizontal, 10)
                 .padding(.bottom, 6)
@@ -76,11 +71,11 @@ struct ContentView: View {
             allowedContentTypes: [UTType(filenameExtension: "gpx") ?? .xml]
         ) { result in
             if case .success(let url) = result {
-                Task { await library.importGPX(from: url) }
+                library.importGPX(from: url)
             }
         }
         .onOpenURL { url in
-            Task { await library.importGPX(from: url) }
+            library.importGPX(from: url)
         }
         .alert(
             library.importMessage ?? "", isPresented: .init(
@@ -90,26 +85,19 @@ struct ContentView: View {
             Button("OK") { library.importMessage = nil }
         }
         .onChange(of: library.active?.entryID) { oldValue, _ in
-            resetTracking()
-            // Re-project the last fix against the new trace: with a static
-            // position, Core Location won't deliver another fix, and the
-            // dot/marker would stay absent until the next movement.
-            handle(location.lastFix)
+            session.activate(library.active, lastFix: location.lastFix)
             // Trace activation is async; hooks that need an active trace run
             // after the first activation, not at onAppear.
             if oldValue == nil {
                 applyPostActivationDebugHooks()
             }
         }
-        .onChange(of: selectedKmRange) {
-            updateSelectionCoordinates()
-        }
         .onAppear(perform: applyDebugHooks)
         .onAppear {
             location.start()
         }
         .onReceive(location.$lastFix) { fix in
-            handle(fix)
+            session.handle(fix)
         }
     }
 
@@ -246,91 +234,19 @@ struct ContentView: View {
     }
 
     private func downloadTiles(for entry: TraceLibrary.Entry) {
-        Task {
-            if let trace = await library.loadTrace(for: entry) {
-                await downloader.download(trace: trace, source: .withID(tileSourceID))
-            }
+        downloader.startDownload(source: .withID(tileSourceID)) {
+            await library.loadTrace(for: entry)
         }
     }
 
     /// Dot color is the whole off-track UI: blue on track, red off, gray
     /// while approaching the start, past the end, or without a status yet.
     private var positionColor: UIColor {
-        switch monitor.status {
+        switch session.offTrackStatus {
         case .onTrack: .systemBlue
         case .offTrack: .systemRed
         case .approachingStart, .finished, .unknown: .systemGray
         }
-    }
-
-    private func resetTracking() {
-        let dwell = monitor.dwell
-        monitor = OffTrackMonitor(dwell: dwell)
-        currentProjection = nil
-        selectedKmRange = nil
-        selectionCoordinates = []
-        visibleKmRange = nil
-        tappedPoint = nil
-    }
-
-    // MARK: - Tapped point info (P3)
-
-    /// Resolves a tap on the MAP: a nearby waypoint wins, otherwise the tap
-    /// snaps to the trace when close enough; a tap far from everything
-    /// dismisses the current info.
-    private func handleMapTap(_ coordinate: CLLocationCoordinate2D, thresholdMeters: Double) {
-        guard let active = library.active else { return }
-        let tapPoint = TrackPoint(latitude: coordinate.latitude, longitude: coordinate.longitude)
-
-        let nearestMark = active.waypointMarks
-            .map { mark in
-                (mark,
-                 Geo.distanceMeters(
-                    from: tapPoint,
-                    to: TrackPoint(latitude: mark.latitude, longitude: mark.longitude)))
-            }
-            .min { $0.1 < $1.1 }
-        if let (mark, distance) = nearestMark, distance < max(thresholdMeters, 60) {
-            tappedPoint = TappedPointInfo(
-                km: mark.km,
-                elevation: active.linearized.elevation(atDistance: mark.km * 1000) ?? 0,
-                latitude: mark.latitude, longitude: mark.longitude,
-                name: mark.name,
-                category: mark.category)
-            return
-        }
-
-        guard
-            let projection = active.projector.project(
-                latitude: coordinate.latitude, longitude: coordinate.longitude),
-            projection.crossTrackDistance < thresholdMeters,
-            let snapped = active.projector.coordinate(atDistance: projection.distanceAlong)
-        else {
-            tappedPoint = nil
-            return
-        }
-        tappedPoint = TappedPointInfo(
-            km: projection.distanceAlong / 1000,
-            elevation: active.linearized.elevation(atDistance: projection.distanceAlong) ?? 0,
-            latitude: snapped.latitude, longitude: snapped.longitude,
-            name: nil)
-    }
-
-    /// Resolves a tap on the PROFILE at a km position; adopts a waypoint's
-    /// name when one sits within 150 m along the trace.
-    private func selectPoint(atKm km: Double) {
-        guard let active = library.active,
-            let elevation = active.linearized.elevation(atDistance: km * 1000),
-            let coordinate = active.projector.coordinate(atDistance: km * 1000)
-        else { return }
-        let nearbyMark = active.waypointMarks
-            .filter { abs($0.km - km) < 0.15 }
-            .min { abs($0.km - km) < abs($1.km - km) }
-        tappedPoint = TappedPointInfo(
-            km: km, elevation: elevation,
-            latitude: coordinate.latitude, longitude: coordinate.longitude,
-            name: nearbyMark?.name,
-            category: nearbyMark?.category ?? .standard)
     }
 
     private func tapInfoChip(_ info: TappedPointInfo) -> some View {
@@ -371,7 +287,7 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Copier les coordonnées GPS")
             Button {
-                tappedPoint = nil
+                session.clearTappedPoint()
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
@@ -385,46 +301,14 @@ struct ContentView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 
-    /// Recomputed only when the selection changes (not on every GPS fix);
-    /// endpoints are interpolated so even a between-samples range highlights.
-    private func updateSelectionCoordinates() {
-        guard let projector = library.active?.projector, let kmRange = selectedKmRange else {
-            selectionCoordinates = []
-            return
-        }
-        var slice = projector
-            .sliceCoordinates(in: (kmRange.lowerBound * 1000)...(kmRange.upperBound * 1000))
-        // The overlay is redrawn on every drag tick — cap its point count
-        // (visually indistinguishable, keeps long-trace drags fluid).
-        let maxOverlayPoints = 800
-        if slice.count > maxOverlayPoints, let last = slice.last {
-            let stride = Double(slice.count) / Double(maxOverlayPoints)
-            slice = (0..<maxOverlayPoints).map { slice[Int(Double($0) * stride)] } + [last]
-        }
-        selectionCoordinates = slice
-            .map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
-    }
-
-    private func handle(_ fix: CLLocation?) {
-        guard let fix, let projector = library.active?.projector,
-            let projection = projector.project(
-                latitude: fix.coordinate.latitude, longitude: fix.coordinate.longitude,
-                nearSegment: currentProjection?.segmentIndex)
-        else { return }
-        monitor.update(
-            projection: projection, horizontalAccuracy: fix.horizontalAccuracy,
-            traceLength: projector.totalDistance, timestamp: fix.timestamp)
-        currentProjection = projection
-    }
-
     private func applyDebugHooks() {
         #if DEBUG
             let env = ProcessInfo.processInfo.environment
             if let dwell = env["OFFTRACK_DWELL"].flatMap(Double.init) {
-                monitor.dwell = dwell
+                session.setOffTrackDwell(dwell)
             }
             if let path = env["IMPORT_GPX"] {
-                Task { await library.importGPX(from: URL(fileURLWithPath: path)) }
+                library.importGPX(from: URL(fileURLWithPath: path))
             }
         #endif
     }
@@ -435,34 +319,32 @@ struct ContentView: View {
             if let preset = env["PRESET_SELECTION"] {
                 let parts = preset.split(separator: "-").compactMap { Double($0) }
                 if parts.count == 2, parts[0] < parts[1] {
-                    selectedKmRange = parts[0]...parts[1]
+                    session.selectedKmRange = parts[0]...parts[1]
                 }
             }
             if let tapPreset = env["PRESET_TAP_KM"].flatMap(Double.init) {
-                selectPoint(atKm: tapPreset)
+                session.selectPoint(atKm: tapPreset)
             }
-            if env["LOG_WAYPOINTS"] == "1", let active = library.active {
+            if env["LOG_WAYPOINTS"] == "1", let active = session.active {
                 for mark in active.waypointMarks {
                     NSLog("RANDO wpt %@ km %.3f", mark.name ?? "?", mark.km)
                 }
             }
-            if let zoomPreset = env["PRESET_ZOOM"], let active = library.active {
+            if let zoomPreset = env["PRESET_ZOOM"], let active = session.active {
                 let maxKm = active.linearized.totalDistance / 1000
-                if zoomPreset == "1", let selection = selectedKmRange {
+                if zoomPreset == "1", let selection = session.selectedKmRange {
                     let padding = (selection.upperBound - selection.lowerBound) * 0.1
-                    visibleKmRange =
+                    session.visibleKmRange =
                         max(0, selection.lowerBound - padding)...min(maxKm, selection.upperBound + padding)
                 } else {
                     let parts = zoomPreset.split(separator: "-").compactMap { Double($0) }
                     if parts.count == 2, parts[0] < parts[1] {
-                        visibleKmRange = max(0, parts[0])...min(maxKm, parts[1])
+                        session.visibleKmRange = max(0, parts[0])...min(maxKm, parts[1])
                     }
                 }
             }
-            if env["AUTO_DOWNLOAD"] == "1", let active = library.active {
-                Task {
-                    await downloader.download(trace: active.trace, source: .withID(tileSourceID))
-                }
+            if env["AUTO_DOWNLOAD"] == "1", let active = session.active {
+                downloader.startDownload(trace: active.trace, source: .withID(tileSourceID))
             }
         #endif
     }
@@ -475,15 +357,6 @@ enum SampleTrace {
         else { return nil }
         return try? GPXParser().parse(data)
     }()
-}
-
-struct TappedPointInfo: Equatable {
-    let km: Double
-    let elevation: Double
-    let latitude: Double
-    let longitude: Double
-    let name: String?
-    var category: Waypoint.Category = .standard
 }
 
 struct MapCameraCommand: Equatable {
@@ -501,7 +374,7 @@ struct MapView: UIViewRepresentable {
     let trace: GPXTrace?
     let waypoints: [Waypoint]
     let traceKey: String
-    let selectionCoordinates: [CLLocationCoordinate2D]
+    let selectionCoordinateSegments: [[CLLocationCoordinate2D]]
     let positionCoordinate: CLLocationCoordinate2D?
     let positionColor: UIColor
     let cameraCommand: MapCameraCommand?
@@ -868,19 +741,26 @@ struct MapView: UIViewRepresentable {
         /// skipped entirely while the selection is unchanged.
         func syncSelection(on mapView: MLNMapView) {
             guard let style = mapView.style else { return }
-            let coordinates = parent.selectionCoordinates
-
-            let key = coordinates.isEmpty
+            let segments = parent.selectionCoordinateSegments
+            let key = segments.isEmpty
                 ? "none"
-                : "\(coordinates.count)-\(coordinates[0].latitude)-\(coordinates[0].longitude)"
-                    + "-\(coordinates[coordinates.count - 1].latitude)-\(coordinates[coordinates.count - 1].longitude)"
+                : segments.map { coordinates in
+                    guard let first = coordinates.first, let last = coordinates.last else {
+                        return "empty"
+                    }
+                    return "\(coordinates.count):\(first.latitude),\(first.longitude)"
+                        + ":\(last.latitude),\(last.longitude)"
+                }.joined(separator: "|")
             guard key != syncedSelectionKey else { return }
             syncedSelectionKey = key
 
-            let shape: MLNShape? =
-                coordinates.count >= 2
-                ? MLNPolylineFeature(coordinates: coordinates, count: UInt(coordinates.count))
-                : nil
+            let polylines: [MLNPolyline] = segments.compactMap { coordinates in
+                guard coordinates.count >= 2 else { return nil }
+                return MLNPolylineFeature(
+                    coordinates: coordinates, count: UInt(coordinates.count))
+            }
+            let shape: MLNShape? = polylines.isEmpty
+                ? nil : MLNMultiPolylineFeature(polylines: polylines)
 
             if let source = style.source(withIdentifier: "selection") as? MLNShapeSource {
                 source.shape = shape

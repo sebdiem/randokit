@@ -20,28 +20,22 @@ extension LinearizedTrace {
     ) -> ElevationStats {
         let slice: [ProfilePoint]
         if let range {
-            // Interpolated boundary points so that a range falling between
-            // two samples still measures the elevation change across it.
-            var built: [ProfilePoint] = []
-            if let start = elevation(atDistance: range.lowerBound) {
-                built.append(ProfilePoint(distance: range.lowerBound, elevation: start))
-            }
-            let lower = points.partitionIndex { $0.distance > range.lowerBound }
-            let upper = points.partitionIndex { $0.distance >= range.upperBound }
-            if lower < upper {
-                built += points[lower..<upper]
-            }
-            if let end = elevation(atDistance: range.upperBound) {
-                built.append(ProfilePoint(distance: range.upperBound, elevation: end))
-            }
-            slice = built
+            slice = profileSlice(in: range)
         } else {
             slice = points
         }
         guard var anchor = slice.first?.elevation else { return ElevationStats() }
+        var segmentIndex = slice[0].segmentIndex
 
         var stats = ElevationStats()
         for point in slice.dropFirst() {
+            if point.segmentIndex != segmentIndex {
+                // A disconnected segment begins a new measurement sequence; its
+                // elevation jump is not climb or descent along the route.
+                anchor = point.elevation
+                segmentIndex = point.segmentIndex
+                continue
+            }
             let delta = point.elevation - anchor
             if delta >= threshold {
                 stats.gain += delta
@@ -63,6 +57,7 @@ extension LinearizedTrace {
         guard upper > 0, upper < points.count else { return first.elevation }
         let a = points[upper - 1]
         let b = points[upper]
+        guard a.segmentIndex == b.segmentIndex else { return a.elevation }
         let span = b.distance - a.distance
         let t = span > 0 ? (distance - a.distance) / span : 0
         return a.elevation + t * (b.elevation - a.elevation)

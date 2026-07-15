@@ -62,6 +62,8 @@ struct TraceProjectionTests {
         let projector = TraceProjector(trace: trace)
         let projection = try #require(projector.project(latitude: 45.001, longitude: 6.01))
         #expect(projection.crossTrackDistance > 700)
+        // Each real segment is ~222 m; the ~1.5 km separation is not route distance.
+        #expect(abs(projector.totalDistance - 444.8) < 3)
     }
 
     @Test func sliceCoordinatesInterpolatesEndpoints() throws {
@@ -72,6 +74,32 @@ struct TraceProjectionTests {
         #expect(slice.count == 2)
         #expect(abs(slice[0].latitude - (45.0 + 30 / 111_195.0)) < 0.0001)
         #expect(abs(slice[1].latitude - (45.0 + 80 / 111_195.0)) < 0.0001)
+    }
+
+    @Test func sliceReturnsDisconnectedPolylinesWithoutGap() throws {
+        let trace = GPXTrace(
+            points: [
+                TrackPoint(latitude: 45.000, longitude: 6.00),
+                TrackPoint(latitude: 45.002, longitude: 6.00),
+                TrackPoint(latitude: 45.002, longitude: 6.02),
+                TrackPoint(latitude: 45.000, longitude: 6.02),
+            ],
+            segmentRanges: [0..<2, 2..<4])
+        let projector = TraceProjector(trace: trace)
+        let slices = projector.sliceCoordinateSegments(in: 50...(projector.totalDistance - 50))
+
+        #expect(slices.count == 2)
+        #expect(slices.allSatisfy { $0.count == 2 })
+        #expect(slices[0].allSatisfy { abs($0.longitude - 6.00) < 0.000_001 })
+        #expect(slices[1].allSatisfy { abs($0.longitude - 6.02) < 0.000_001 })
+    }
+
+    @Test func preparedTraceReusesCanonicalGeometry() {
+        let trace = GPXTrace(points: straightTrace)
+        let prepared = PreparedTrace(trace: trace)
+
+        #expect(prepared.geometry.cumulativeDistances == prepared.projector.cumulativeDistances)
+        #expect(prepared.linearized.points.map(\.distance) == prepared.geometry.cumulativeDistances)
     }
 }
 

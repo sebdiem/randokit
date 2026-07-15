@@ -50,3 +50,14 @@ targets:
             UTTypeConformsTo: [public.xml]
             UTTypeTagSpecification:
               public.filename-extension: [gpx]
+
+  RandoTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/RandoTests
+    dependencies:
+      - target: Rando
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
