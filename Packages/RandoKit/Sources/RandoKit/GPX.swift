@@ -19,12 +19,21 @@ public struct Waypoint: Equatable, Sendable {
     public var longitude: Double
     public var name: String?
     public var elevation: Double?
+    /// GPX `<sym>` — a symbol/category hint (e.g. "Campground", "Lodging").
+    public var symbol: String?
+    /// GPX `<type>` — a free-form classification string.
+    public var type: String?
 
-    public init(latitude: Double, longitude: Double, name: String? = nil, elevation: Double? = nil) {
+    public init(
+        latitude: Double, longitude: Double, name: String? = nil, elevation: Double? = nil,
+        symbol: String? = nil, type: String? = nil
+    ) {
         self.latitude = latitude
         self.longitude = longitude
         self.name = name
         self.elevation = elevation
+        self.symbol = symbol
+        self.type = type
     }
 }
 
@@ -97,6 +106,8 @@ public struct GPXParser {
         private var pendingElevation: Double?
         private var pendingTime: Date?
         private var pendingName: String?
+        private var pendingSymbol: String?
+        private var pendingType: String?
         private var inTrackOrRoute = false
         private var inMetadata = false
 
@@ -131,6 +142,8 @@ public struct GPXParser {
                 pendingElevation = nil
                 pendingTime = nil
                 pendingName = nil
+                pendingSymbol = nil
+                pendingType = nil
             default:
                 break
             }
@@ -158,6 +171,14 @@ public struct GPXParser {
                 } else if (inTrackOrRoute || inMetadata) && traceName == nil {
                     traceName = trimmed.isEmpty ? nil : trimmed
                 }
+            case "sym":
+                if pending != nil, pendingIsWaypoint, !trimmed.isEmpty {
+                    pendingSymbol = trimmed
+                }
+            case "type":
+                if pending != nil, pendingIsWaypoint, !trimmed.isEmpty {
+                    pendingType = trimmed
+                }
             case "trkpt", "rtept":
                 if let p = pending, !pendingIsWaypoint {
                     points.append(
@@ -167,7 +188,9 @@ public struct GPXParser {
             case "wpt":
                 if let p = pending, pendingIsWaypoint {
                     waypoints.append(
-                        Waypoint(latitude: p.lat, longitude: p.lon, name: pendingName, elevation: pendingElevation))
+                        Waypoint(
+                            latitude: p.lat, longitude: p.lon, name: pendingName,
+                            elevation: pendingElevation, symbol: pendingSymbol, type: pendingType))
                 }
                 pending = nil
             case "trkseg":

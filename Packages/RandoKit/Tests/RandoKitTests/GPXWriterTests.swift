@@ -15,7 +15,9 @@ struct GPXWriterTests {
                 TrackPoint(latitude: 45.9801, longitude: 6.8859),
             ],
             waypoints: [
-                Waypoint(latitude: 45.9801, longitude: 6.8859, name: "Refuge", elevation: 2352)
+                Waypoint(
+                    latitude: 45.9801, longitude: 6.8859, name: "Refuge", elevation: 2352,
+                    symbol: "Campground", type: "nuit")
             ])
 
         let reparsed = try GPXParser().parse(GPXWriter().write(original))

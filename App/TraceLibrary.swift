@@ -1,6 +1,23 @@
 import Foundation
 import RandoKit
 
+extension Waypoint {
+    /// Overnight-stop convention: the GPX `<sym>` or `<type>` contains one of
+    /// these keywords (set them in gpx.studio, a text editor, …). The NAME is
+    /// deliberately not matched — "Refuge du Lac Blanc" as a plain POI must
+    /// not become a night stop by accident.
+    var isOvernightStop: Bool {
+        let haystack = "\(symbol ?? "") \(type ?? "")".lowercased()
+        guard !haystack.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        let keywords = [
+            "campground", "camping", "camp", "tent", "bivouac", "bivy",
+            "lodging", "hotel", "hut", "refuge", "gite", "gîte",
+            "nuit", "night", "etape", "étape",
+        ]
+        return keywords.contains { haystack.contains($0) }
+    }
+}
+
 /// The app's traces: plain GPX files in Documents (visible in the Files app),
 /// plus the bundled sample. Selecting an entry loads and pre-computes
 /// everything the UI needs (linearization, projector).
@@ -29,6 +46,7 @@ final class TraceLibrary: ObservableObject {
         let km: Double
         let latitude: Double
         let longitude: Double
+        let isOvernightStop: Bool
     }
 
     @Published private(set) var entries: [Entry] = []
@@ -92,7 +110,8 @@ final class TraceLibrary: ObservableObject {
             else { return nil }
             return WaypointMark(
                 name: waypoint.name, km: projection.distanceAlong / 1000,
-                latitude: waypoint.latitude, longitude: waypoint.longitude)
+                latitude: waypoint.latitude, longitude: waypoint.longitude,
+                isOvernightStop: waypoint.isOvernightStop)
         }
         return Active(
             entryID: entry.id,

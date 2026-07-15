@@ -295,7 +295,8 @@ struct ContentView: View {
                 km: mark.km,
                 elevation: active.linearized.elevation(atDistance: mark.km * 1000) ?? 0,
                 latitude: mark.latitude, longitude: mark.longitude,
-                name: mark.name)
+                name: mark.name,
+                isOvernightStop: mark.isOvernightStop)
             return
         }
 
@@ -322,20 +323,23 @@ struct ContentView: View {
             let elevation = active.linearized.elevation(atDistance: km * 1000),
             let coordinate = active.projector.coordinate(atDistance: km * 1000)
         else { return }
-        let nearbyName = active.waypointMarks
+        let nearbyMark = active.waypointMarks
             .filter { abs($0.km - km) < 0.15 }
-            .min { abs($0.km - km) < abs($1.km - km) }?
-            .name
+            .min { abs($0.km - km) < abs($1.km - km) }
         tappedPoint = TappedPointInfo(
             km: km, elevation: elevation,
             latitude: coordinate.latitude, longitude: coordinate.longitude,
-            name: nearbyName)
+            name: nearbyMark?.name,
+            isOvernightStop: nearbyMark?.isOvernightStop ?? false)
     }
 
     private func tapInfoChip(_ info: TappedPointInfo) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: info.name != nil ? "mappin.circle.fill" : "scope")
-                .foregroundStyle(.purple)
+            Image(
+                systemName: info.isOvernightStop
+                    ? "tent.fill" : (info.name != nil ? "mappin.circle.fill" : "scope")
+            )
+            .foregroundStyle(info.isOvernightStop ? Color.indigo : .purple)
             VStack(alignment: .leading, spacing: 1) {
                 if let name = info.name {
                     Text(name)
@@ -473,6 +477,7 @@ struct TappedPointInfo: Equatable {
     let latitude: Double
     let longitude: Double
     let name: String?
+    var isOvernightStop = false
 }
 
 struct MapCameraCommand: Equatable {
@@ -723,36 +728,43 @@ struct MapView: UIViewRepresentable {
                 let feature = MLNPointFeature()
                 feature.coordinate = CLLocationCoordinate2D(
                     latitude: waypoint.latitude, longitude: waypoint.longitude)
+                feature.attributes = [
+                    "icon": waypoint.isOvernightStop ? "waypoint-night" : "waypoint-pin"
+                ]
                 return feature
             }
             let shape = MLNShapeCollectionFeature(shapes: features)
             if let source = style.source(withIdentifier: "waypoints") as? MLNShapeSource {
                 source.shape = shape
             } else {
-                if let pin = Self.waypointPinImage() {
+                if let pin = Self.haloGlyphImage(symbol: "mappin", color: .systemTeal) {
                     style.setImage(pin, forName: "waypoint-pin")
+                }
+                if let tent = Self.haloGlyphImage(symbol: "tent.fill", color: .systemIndigo) {
+                    style.setImage(tent, forName: "waypoint-night")
                 }
                 let source = MLNShapeSource(identifier: "waypoints", shape: shape)
                 style.addSource(source)
                 let layer = MLNSymbolStyleLayer(identifier: "waypoints", source: source)
-                layer.iconImageName = NSExpression(forConstantValue: "waypoint-pin")
+                // Data-driven: each feature carries its icon name.
+                layer.iconImageName = NSExpression(forKeyPath: "icon")
                 layer.iconAllowsOverlap = NSExpression(forConstantValue: true)
-                // The pin's needle tip sits ON the waypoint position.
+                // The glyph's bottom sits ON the waypoint position.
                 layer.iconAnchor = NSExpression(forConstantValue: "bottom")
                 style.addLayer(layer)
             }
         }
 
-        /// Teal map pin on a transparent background, with a white halo for
+        /// SF glyph on a transparent background, with a white halo for
         /// readability over any terrain (drawn by stamping a heavier white
         /// glyph at small offsets behind the colored one).
-        private static func waypointPinImage() -> UIImage? {
+        private static func haloGlyphImage(symbol: String, color: UIColor) -> UIImage? {
             let haloConfiguration = UIImage.SymbolConfiguration(pointSize: 14, weight: .heavy)
                 .applying(UIImage.SymbolConfiguration(paletteColors: [.white]))
             let configuration = UIImage.SymbolConfiguration(pointSize: 14, weight: .bold)
-                .applying(UIImage.SymbolConfiguration(paletteColors: [.systemTeal]))
-            guard let halo = UIImage(systemName: "mappin", withConfiguration: haloConfiguration),
-                let glyph = UIImage(systemName: "mappin", withConfiguration: configuration)
+                .applying(UIImage.SymbolConfiguration(paletteColors: [color]))
+            guard let halo = UIImage(systemName: symbol, withConfiguration: haloConfiguration),
+                let glyph = UIImage(systemName: symbol, withConfiguration: configuration)
             else { return nil }
             let size = CGSize(width: glyph.size.width + 4, height: glyph.size.height + 4)
             return UIGraphicsImageRenderer(size: size).image { _ in

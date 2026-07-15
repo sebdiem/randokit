@@ -28,6 +28,12 @@ public struct GPXWriter {
             if let name = waypoint.name {
                 xml += "<name>\(escape(name))</name>"
             }
+            if let symbol = waypoint.symbol {
+                xml += "<sym>\(escape(symbol))</sym>"
+            }
+            if let type = waypoint.type {
+                xml += "<type>\(escape(type))</type>"
+            }
             xml += "</wpt>\n"
         }
         xml += "  <trk>\n"
