@@ -5,6 +5,7 @@ import SwiftUI
 struct ContentView: View {
     @AppStorage("tileSourceID") private var tileSourceID = TileSource.ignPlanV2.id
     private let trace = SampleTrace.trace
+    private let linearized = SampleTrace.trace.map { LinearizedTrace(trackPoints: $0.points) }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -24,6 +25,14 @@ struct ContentView: View {
                     .background(.regularMaterial, in: Circle())
             }
             .padding(.trailing, 12)
+        }
+        .overlay(alignment: .bottom) {
+            if let linearized {
+                ElevationProfileView(name: trace?.name, linearized: linearized)
+                    .frame(height: 200)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
+            }
         }
     }
 }
