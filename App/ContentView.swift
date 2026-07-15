@@ -258,13 +258,18 @@ struct ContentView: View {
                     selectedKmRange = parts[0]...parts[1]
                 }
             }
-            if env["PRESET_ZOOM"] == "1", let selection = selectedKmRange,
-                let active = library.active
-            {
+            if let zoomPreset = env["PRESET_ZOOM"], let active = library.active {
                 let maxKm = active.linearized.totalDistance / 1000
-                let padding = (selection.upperBound - selection.lowerBound) * 0.1
-                visibleKmRange =
-                    max(0, selection.lowerBound - padding)...min(maxKm, selection.upperBound + padding)
+                if zoomPreset == "1", let selection = selectedKmRange {
+                    let padding = (selection.upperBound - selection.lowerBound) * 0.1
+                    visibleKmRange =
+                        max(0, selection.lowerBound - padding)...min(maxKm, selection.upperBound + padding)
+                } else {
+                    let parts = zoomPreset.split(separator: "-").compactMap { Double($0) }
+                    if parts.count == 2, parts[0] < parts[1] {
+                        visibleKmRange = max(0, parts[0])...min(maxKm, parts[1])
+                    }
+                }
             }
             if env["AUTO_DOWNLOAD"] == "1", let active = library.active {
                 Task {

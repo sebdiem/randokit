@@ -63,7 +63,7 @@ struct ElevationProfileView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             header
-            miniMap
+            miniMapRow
 
             // The chart exports its plot-area ANCHOR; it is resolved to a rect
             // here, at layout time, in this view's coordinate space. Selection
@@ -146,12 +146,20 @@ struct ElevationProfileView: View {
         }
     }
 
-    // MARK: - Mini-map (shown while zoomed: context + drag-to-pan)
+    // MARK: - Mini-map row (shown while zoomed: zoom controls + context + drag-to-pan)
 
     @ViewBuilder
-    private var miniMap: some View {
+    private var miniMapRow: some View {
         if visibleKmRange != nil, maxKm > 0 {
-            GeometryReader { geometry in
+            HStack(spacing: 8) {
+                headerButton("minus.magnifyingglass", action: resetZoom)
+                miniMapStrip
+            }
+        }
+    }
+
+    private var miniMapStrip: some View {
+        GeometryReader { geometry in
                 let width = geometry.size.width
                 ZStack(alignment: .topLeading) {
                     MiniProfilePath(profile: displayProfile, maxDistance: linearized.totalDistance)
@@ -184,9 +192,8 @@ struct ElevationProfileView: View {
                             }
                         }
                 )
-            }
-            .frame(height: 18)
         }
+        .frame(height: 18)
     }
 
     // MARK: - Selection overlay (band, handles, gestures)
@@ -392,12 +399,22 @@ struct ElevationProfileView: View {
                 if canZoomToSelection {
                     headerButton("plus.magnifyingglass", action: zoomToSelection)
                 }
-                if visibleKmRange != nil {
-                    headerButton("minus.magnifyingglass", action: resetZoom)
-                }
                 headerButton("xmark.circle.fill") {
                     selectedKmRange = nil
                 }
+            } else if let window = visibleKmRange {
+                // Zoomed without a selection: the header describes the visible
+                // window, so the numbers always match what the chart shows.
+                Text("\(kmLabel(window.lowerBound)) – \(kmLabel(window.upperBound)) km")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                Text(summary(for: window))
+                    .font(.footnote.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             } else {
                 Text(name ?? "Trace")
                     .font(.footnote.weight(.semibold))
@@ -408,11 +425,12 @@ struct ElevationProfileView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                if visibleKmRange != nil {
-                    headerButton("minus.magnifyingglass", action: resetZoom)
-                }
             }
         }
+    }
+
+    private func kmLabel(_ km: Double) -> String {
+        km.formatted(.number.precision(.fractionLength(1)))
     }
 
     private func headerButton(_ systemName: String, action: @escaping () -> Void) -> some View {
