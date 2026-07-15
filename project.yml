@@ -38,3 +38,13 @@ targets:
           - UIInterfaceOrientationPortrait
         NSLocationWhenInUseUsageDescription: Rando shows your position on the map and along your hiking trace.
         ITSAppUsesNonExemptEncryption: false
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: GPX track
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.topografix.gpx]
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.topografix.gpx
+            UTTypeDescription: GPX track
+            UTTypeConformsTo: [public.xml]
+            UTTypeTagSpecification:
+              public.filename-extension: [gpx]

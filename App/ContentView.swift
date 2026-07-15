@@ -1,22 +1,23 @@
 import MapLibre
 import RandoKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @AppStorage("tileSourceID") private var tileSourceID = TileSource.ignPlanV2.id
-    @State private var selectedKmRange: ClosedRange<Double>?
+    @StateObject private var library = TraceLibrary()
     @StateObject private var downloader = CorridorDownloader()
     @StateObject private var location = LocationService()
+    @State private var selectedKmRange: ClosedRange<Double>?
     @State private var monitor = OffTrackMonitor()
     @State private var currentProjection: TraceProjection?
-    private let trace = SampleTrace.trace
-    private let linearized = SampleTrace.trace.map { LinearizedTrace(trackPoints: $0.points) }
-    private let projector = SampleTrace.trace.map { TraceProjector(trackPoints: $0.points) }
+    @State private var showsTracePicker = false
+    @State private var showsFileImporter = false
 
     private var selectionCoordinates: [CLLocationCoordinate2D] {
-        guard let trace, let linearized, let kmRange = selectedKmRange else { return [] }
+        guard let active = library.active, let kmRange = selectedKmRange else { return [] }
         let meters = (kmRange.lowerBound * 1000)...(kmRange.upperBound * 1000)
-        return zip(trace.points, linearized.points)
+        return zip(active.trace.points, active.linearized.points)
             .filter { meters.contains($0.1.distance) }
             .map { CLLocationCoordinate2D(latitude: $0.0.latitude, longitude: $0.0.longitude) }
     }
@@ -24,52 +25,22 @@ struct ContentView: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             MapView(
-                tileSource: .withID(tileSourceID), trace: trace,
+                tileSource: .withID(tileSourceID),
+                trace: library.active?.trace,
+                traceKey: library.active?.entryID ?? "none",
                 selectionCoordinates: selectionCoordinates,
                 positionCoordinate: location.lastFix?.coordinate,
                 positionColor: positionColor
             )
             .ignoresSafeArea()
 
-            VStack(spacing: 10) {
-                Menu {
-                    Picker("Fond de carte", selection: $tileSourceID) {
-                        ForEach(TileSource.all) { source in
-                            Text(source.name).tag(source.id)
-                        }
-                    }
-                } label: {
-                    Image(systemName: "map")
-                        .font(.system(size: 18, weight: .medium))
-                        .padding(11)
-                        .background(.regularMaterial, in: Circle())
-                }
-
-                if let progress = downloader.progress {
-                    Text("\(Int(progress * 100)) %")
-                        .font(.footnote.monospacedDigit().weight(.semibold))
-                        .padding(8)
-                        .background(.regularMaterial, in: Capsule())
-                } else if let trace {
-                    Button {
-                        Task {
-                            await downloader.download(
-                                points: trace.points, source: .withID(tileSourceID))
-                        }
-                    } label: {
-                        Image(systemName: "arrow.down.circle")
-                            .font(.system(size: 18, weight: .medium))
-                            .padding(11)
-                            .background(.regularMaterial, in: Circle())
-                    }
-                }
-            }
-            .padding(.trailing, 12)
+            controls
+                .padding(.trailing, 12)
         }
         .overlay(alignment: .bottom) {
-            if let linearized {
+            if let active = library.active {
                 ElevationProfileView(
-                    name: trace?.name, linearized: linearized,
+                    name: active.trace.name, linearized: active.linearized,
                     selectedKmRange: $selectedKmRange,
                     currentKm: currentProjection.map { $0.distanceAlong / 1000 },
                     positionIsOnTrack: monitor.status == .onTrack
@@ -79,13 +50,120 @@ struct ContentView: View {
                 .padding(.bottom, 6)
             }
         }
-        .onAppear(perform: applyPresetSelection)
+        .sheet(isPresented: $showsTracePicker) {
+            tracePicker
+        }
+        .fileImporter(
+            isPresented: $showsFileImporter,
+            allowedContentTypes: [UTType(filenameExtension: "gpx") ?? .xml]
+        ) { result in
+            if case .success(let url) = result {
+                Task { await library.importGPX(from: url) }
+            }
+        }
+        .onOpenURL { url in
+            Task { await library.importGPX(from: url) }
+        }
+        .alert(
+            library.importMessage ?? "", isPresented: .init(
+                get: { library.importMessage != nil },
+                set: { if !$0 { library.importMessage = nil } })
+        ) {
+            Button("OK") { library.importMessage = nil }
+        }
+        .onChange(of: library.active?.entryID) {
+            resetTracking()
+        }
+        .onAppear(perform: applyDebugHooks)
         .onAppear {
             location.start()
         }
         .onReceive(location.$lastFix) { fix in
             handle(fix)
         }
+    }
+
+    private var controls: some View {
+        VStack(spacing: 10) {
+            Menu {
+                Picker("Fond de carte", selection: $tileSourceID) {
+                    ForEach(TileSource.all) { source in
+                        Text(source.name).tag(source.id)
+                    }
+                }
+            } label: {
+                controlIcon("map")
+            }
+
+            Button {
+                showsTracePicker = true
+            } label: {
+                controlIcon("folder")
+            }
+
+            if library.isImporting {
+                ProgressView()
+                    .padding(11)
+                    .background(.regularMaterial, in: Circle())
+            }
+
+            if let progress = downloader.progress {
+                Text("\(Int(progress * 100)) %")
+                    .font(.footnote.monospacedDigit().weight(.semibold))
+                    .padding(8)
+                    .background(.regularMaterial, in: Capsule())
+            } else if let active = library.active {
+                Button {
+                    Task {
+                        await downloader.download(
+                            points: active.trace.points, source: .withID(tileSourceID))
+                    }
+                } label: {
+                    controlIcon("arrow.down.circle")
+                }
+            }
+        }
+    }
+
+    private func controlIcon(_ systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 18, weight: .medium))
+            .padding(11)
+            .background(.regularMaterial, in: Circle())
+    }
+
+    private var tracePicker: some View {
+        NavigationStack {
+            List {
+                ForEach(library.entries) { entry in
+                    Button {
+                        library.select(entry)
+                        showsTracePicker = false
+                    } label: {
+                        HStack {
+                            Text(entry.name)
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            if entry.id == library.active?.entryID {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(.tint)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Traces")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Importer…") {
+                        showsTracePicker = false
+                        showsFileImporter = true
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 
     /// Dot color is the whole off-track UI: blue on track, red off, gray
@@ -98,8 +176,15 @@ struct ContentView: View {
         }
     }
 
+    private func resetTracking() {
+        let dwell = monitor.dwell
+        monitor = OffTrackMonitor(dwell: dwell)
+        currentProjection = nil
+        selectedKmRange = nil
+    }
+
     private func handle(_ fix: CLLocation?) {
-        guard let fix, let projector,
+        guard let fix, let projector = library.active?.projector,
             let projection = projector.project(
                 latitude: fix.coordinate.latitude, longitude: fix.coordinate.longitude,
                 nearSegment: currentProjection?.segmentIndex)
@@ -110,25 +195,26 @@ struct ContentView: View {
         currentProjection = projection
     }
 
-    private func applyPresetSelection() {
+    private func applyDebugHooks() {
         #if DEBUG
-            // Headless UI verification: SIMCTL_CHILD_PRESET_SELECTION="0.8-1.8" (km).
-            if let preset = ProcessInfo.processInfo.environment["PRESET_SELECTION"] {
+            let env = ProcessInfo.processInfo.environment
+            if let preset = env["PRESET_SELECTION"] {
                 let parts = preset.split(separator: "-").compactMap { Double($0) }
                 if parts.count == 2, parts[0] < parts[1] {
                     selectedKmRange = parts[0]...parts[1]
                 }
             }
-            // Headless verification: start the corridor download at launch.
-            if ProcessInfo.processInfo.environment["AUTO_DOWNLOAD"] == "1", let trace {
+            if env["AUTO_DOWNLOAD"] == "1", let active = library.active {
                 Task {
-                    await downloader.download(points: trace.points, source: .withID(tileSourceID))
+                    await downloader.download(
+                        points: active.trace.points, source: .withID(tileSourceID))
                 }
             }
-            // Headless verification: shrink the off-track dwell.
-            if let dwell = ProcessInfo.processInfo.environment["OFFTRACK_DWELL"]
-                .flatMap(Double.init) {
+            if let dwell = env["OFFTRACK_DWELL"].flatMap(Double.init) {
                 monitor.dwell = dwell
+            }
+            if let path = env["IMPORT_GPX"] {
+                Task { await library.importGPX(from: URL(fileURLWithPath: path)) }
             }
         #endif
     }
@@ -137,7 +223,7 @@ struct ContentView: View {
 enum SampleTrace {
     static let trace: GPXTrace? = {
         guard let url = Bundle.main.url(forResource: "SampleTrace", withExtension: "gpx"),
-              let data = try? Data(contentsOf: url)
+            let data = try? Data(contentsOf: url)
         else { return nil }
         return try? GPXParser().parse(data)
     }()
@@ -146,6 +232,7 @@ enum SampleTrace {
 struct MapView: UIViewRepresentable {
     let tileSource: TileSource
     let trace: GPXTrace?
+    let traceKey: String
     let selectionCoordinates: [CLLocationCoordinate2D]
     let positionCoordinate: CLLocationCoordinate2D?
     let positionColor: UIColor
@@ -168,8 +255,7 @@ struct MapView: UIViewRepresentable {
     func updateUIView(_ view: MLNMapView, context: Context) {
         context.coordinator.parent = self
         apply(tileSource, to: view)
-        context.coordinator.syncSelection(on: view)
-        context.coordinator.syncPosition(on: view)
+        context.coordinator.syncAll(on: view)
     }
 
     private func apply(_ source: TileSource, to view: MLNMapView) {
@@ -182,45 +268,80 @@ struct MapView: UIViewRepresentable {
 
     final class Coordinator: NSObject, MLNMapViewDelegate {
         var parent: MapView
-        private var hasFramedTrace = false
+        private var framedTraceKey: String?
 
         init(_ parent: MapView) {
             self.parent = parent
         }
 
         // Fires after every style load, including basemap switches (which wipe
-        // all runtime layers) — so the trace is (re)added here and nowhere else.
+        // all runtime layers) — everything is re-synced from scratch here.
         func mapView(_ mapView: MLNMapView, didFinishLoading style: MLNStyle) {
-            addTraceLayers(to: style)
-            frameTrace(on: mapView)
+            syncAll(on: mapView)
+        }
+
+        func syncAll(on mapView: MLNMapView) {
+            guard mapView.style != nil else { return }
+            syncTrace(on: mapView)
             syncSelection(on: mapView)
             syncPosition(on: mapView)
         }
 
-        /// GPS dot, always topmost. Color carries the off-track state.
-        func syncPosition(on mapView: MLNMapView) {
+        private func syncTrace(on mapView: MLNMapView) {
             guard let style = mapView.style else { return }
+            guard let points = parent.trace?.points, points.count >= 2 else { return }
+            let coordinates = points.map {
+                CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+            }
+            let line = MLNPolylineFeature(coordinates: coordinates, count: UInt(coordinates.count))
 
-            let shape: MLNShape? = parent.positionCoordinate.map { coordinate in
-                let point = MLNPointFeature()
-                point.coordinate = coordinate
-                return point
+            if let source = style.source(withIdentifier: "trace") as? MLNShapeSource {
+                source.shape = line
+            } else {
+                let source = MLNShapeSource(identifier: "trace", shape: line)
+                style.addSource(source)
+
+                let casing = MLNLineStyleLayer(identifier: "trace-casing", source: source)
+                casing.lineColor = NSExpression(forConstantValue: UIColor.white)
+                casing.lineWidth = NSExpression(forConstantValue: 7)
+                casing.lineCap = NSExpression(forConstantValue: "round")
+                casing.lineJoin = NSExpression(forConstantValue: "round")
+                style.addLayer(casing)
+
+                let stroke = MLNLineStyleLayer(identifier: "trace-line", source: source)
+                stroke.lineColor = NSExpression(
+                    forConstantValue: UIColor(red: 0.56, green: 0.14, blue: 0.67, alpha: 1))
+                stroke.lineWidth = NSExpression(forConstantValue: 4)
+                stroke.lineCap = NSExpression(forConstantValue: "round")
+                stroke.lineJoin = NSExpression(forConstantValue: "round")
+                style.addLayer(stroke)
             }
 
-            if let source = style.source(withIdentifier: "position") as? MLNShapeSource {
-                source.shape = shape
-                if let layer = style.layer(withIdentifier: "position") as? MLNCircleStyleLayer {
-                    layer.circleColor = NSExpression(forConstantValue: parent.positionColor)
-                }
-            } else if shape != nil {
-                let source = MLNShapeSource(identifier: "position", shape: shape)
+            syncEndpoint(coordinates.first!, id: "trace-start", color: .systemGreen, style: style)
+            syncEndpoint(coordinates.last!, id: "trace-end", color: .systemRed, style: style)
+
+            if framedTraceKey != parent.traceKey {
+                framedTraceKey = parent.traceKey
+                frame(coordinates: coordinates, on: mapView)
+            }
+        }
+
+        private func syncEndpoint(
+            _ coordinate: CLLocationCoordinate2D, id: String, color: UIColor, style: MLNStyle
+        ) {
+            let point = MLNPointFeature()
+            point.coordinate = coordinate
+            if let source = style.source(withIdentifier: id) as? MLNShapeSource {
+                source.shape = point
+            } else {
+                let source = MLNShapeSource(identifier: id, shape: point)
                 style.addSource(source)
-                let layer = MLNCircleStyleLayer(identifier: "position", source: source)
-                layer.circleColor = NSExpression(forConstantValue: parent.positionColor)
-                layer.circleRadius = NSExpression(forConstantValue: 9)
-                layer.circleStrokeColor = NSExpression(forConstantValue: UIColor.white)
-                layer.circleStrokeWidth = NSExpression(forConstantValue: 3)
-                style.addLayer(layer)
+                let circle = MLNCircleStyleLayer(identifier: id, source: source)
+                circle.circleColor = NSExpression(forConstantValue: color)
+                circle.circleRadius = NSExpression(forConstantValue: 7)
+                circle.circleStrokeColor = NSExpression(forConstantValue: UIColor.white)
+                circle.circleStrokeWidth = NSExpression(forConstantValue: 2.5)
+                style.addLayer(circle)
             }
         }
 
@@ -253,61 +374,41 @@ struct MapView: UIViewRepresentable {
             }
         }
 
-        private func addTraceLayers(to style: MLNStyle) {
-            guard let points = parent.trace?.points, points.count >= 2 else { return }
-            let coordinates = points.map {
-                CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+        /// GPS dot, always topmost. Color carries the off-track state.
+        func syncPosition(on mapView: MLNMapView) {
+            guard let style = mapView.style else { return }
+
+            let shape: MLNShape? = parent.positionCoordinate.map { coordinate in
+                let point = MLNPointFeature()
+                point.coordinate = coordinate
+                return point
             }
 
-            let line = MLNPolylineFeature(coordinates: coordinates, count: UInt(coordinates.count))
-            let traceSource = MLNShapeSource(identifier: "trace", shape: line)
-            style.addSource(traceSource)
-
-            let casing = MLNLineStyleLayer(identifier: "trace-casing", source: traceSource)
-            casing.lineColor = NSExpression(forConstantValue: UIColor.white)
-            casing.lineWidth = NSExpression(forConstantValue: 7)
-            casing.lineCap = NSExpression(forConstantValue: "round")
-            casing.lineJoin = NSExpression(forConstantValue: "round")
-            style.addLayer(casing)
-
-            let stroke = MLNLineStyleLayer(identifier: "trace-line", source: traceSource)
-            stroke.lineColor = NSExpression(
-                forConstantValue: UIColor(red: 0.56, green: 0.14, blue: 0.67, alpha: 1))
-            stroke.lineWidth = NSExpression(forConstantValue: 4)
-            stroke.lineCap = NSExpression(forConstantValue: "round")
-            stroke.lineJoin = NSExpression(forConstantValue: "round")
-            style.addLayer(stroke)
-
-            addEndpoint(coordinates.first!, id: "trace-start", color: .systemGreen, to: style)
-            addEndpoint(coordinates.last!, id: "trace-end", color: .systemRed, to: style)
+            if let source = style.source(withIdentifier: "position") as? MLNShapeSource {
+                source.shape = shape
+                if let layer = style.layer(withIdentifier: "position") as? MLNCircleStyleLayer {
+                    layer.circleColor = NSExpression(forConstantValue: parent.positionColor)
+                }
+            } else if shape != nil {
+                let source = MLNShapeSource(identifier: "position", shape: shape)
+                style.addSource(source)
+                let layer = MLNCircleStyleLayer(identifier: "position", source: source)
+                layer.circleColor = NSExpression(forConstantValue: parent.positionColor)
+                layer.circleRadius = NSExpression(forConstantValue: 9)
+                layer.circleStrokeColor = NSExpression(forConstantValue: UIColor.white)
+                layer.circleStrokeWidth = NSExpression(forConstantValue: 3)
+                style.addLayer(layer)
+            }
         }
 
-        private func addEndpoint(
-            _ coordinate: CLLocationCoordinate2D, id: String, color: UIColor, to style: MLNStyle
-        ) {
-            let point = MLNPointFeature()
-            point.coordinate = coordinate
-            let source = MLNShapeSource(identifier: id, shape: point)
-            style.addSource(source)
-            let circle = MLNCircleStyleLayer(identifier: id, source: source)
-            circle.circleColor = NSExpression(forConstantValue: color)
-            circle.circleRadius = NSExpression(forConstantValue: 7)
-            circle.circleStrokeColor = NSExpression(forConstantValue: UIColor.white)
-            circle.circleStrokeWidth = NSExpression(forConstantValue: 2.5)
-            style.addLayer(circle)
-        }
-
-        private func frameTrace(on mapView: MLNMapView) {
-            guard !hasFramedTrace, let points = parent.trace?.points, !points.isEmpty else { return }
-            hasFramedTrace = true
-            var bounds = MLNCoordinateBounds(
-                sw: CLLocationCoordinate2D(latitude: points[0].latitude, longitude: points[0].longitude),
-                ne: CLLocationCoordinate2D(latitude: points[0].latitude, longitude: points[0].longitude))
-            for p in points {
-                bounds.sw.latitude = min(bounds.sw.latitude, p.latitude)
-                bounds.sw.longitude = min(bounds.sw.longitude, p.longitude)
-                bounds.ne.latitude = max(bounds.ne.latitude, p.latitude)
-                bounds.ne.longitude = max(bounds.ne.longitude, p.longitude)
+        private func frame(coordinates: [CLLocationCoordinate2D], on mapView: MLNMapView) {
+            guard let first = coordinates.first else { return }
+            var bounds = MLNCoordinateBounds(sw: first, ne: first)
+            for coordinate in coordinates {
+                bounds.sw.latitude = min(bounds.sw.latitude, coordinate.latitude)
+                bounds.sw.longitude = min(bounds.sw.longitude, coordinate.longitude)
+                bounds.ne.latitude = max(bounds.ne.latitude, coordinate.latitude)
+                bounds.ne.longitude = max(bounds.ne.longitude, coordinate.longitude)
             }
             mapView.setVisibleCoordinateBounds(
                 bounds,
