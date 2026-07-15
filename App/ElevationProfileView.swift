@@ -2,6 +2,11 @@ import Charts
 import RandoKit
 import SwiftUI
 
+/// Interaction model ("map grammar"): the profile behaves exactly like the
+/// map above it — drag pans (when zoomed), pinch zooms anchored, double-tap
+/// zooms in. A measurement is an explicit placed object (ruler button or
+/// long-press), adjusted ONLY through its two handles; it is never created or
+/// moved by plain drags. One grammar for navigation, one object for measuring.
 struct ElevationProfileView: View {
     let name: String?
     /// Full resolution — all measurements come from here.
@@ -20,23 +25,19 @@ struct ElevationProfileView: View {
     /// domain and points flip in the same body pass (single chart re-render).
     @State private var zoomedProfile: [ProfilePoint]?
     @State private var dragMode: DragMode?
-    /// km anchor of an in-progress new-range drag. Stored in data space, not
-    /// pixels: the domain can pan mid-drag (edge auto-pan).
-    @State private var dragAnchorKm: Double?
-    @State private var lastDragX: CGFloat = 0
-    @State private var lastDragPlot: CGRect = .zero
-    @State private var autoPanTask: Task<Void, Never>?
+    @State private var panConsumedX: CGFloat = 0
     @State private var pinchStart: (domain: ClosedRange<Double>, anchorFraction: Double)?
     @State private var miniMapGrabOffsetKm: Double?
+    @State private var longPressCreated = false
 
     private enum DragMode {
-        case newRange
+        case panning
         case adjustLower
         case adjustUpper
     }
 
-    /// Touch tolerance around a selection edge that grabs the handle instead
-    /// of starting a new selection.
+    /// Touch tolerance around a measurement handle: inside it a drag adjusts
+    /// that edge, everywhere else a drag pans.
     private static let handleGrabWidth: CGFloat = 24
     private static let minZoomSpanKm = 0.2
 
@@ -71,9 +72,9 @@ struct ElevationProfileView: View {
             miniMapRow
 
             // The chart exports its plot-area ANCHOR; it is resolved to a rect
-            // here, at layout time, in this view's coordinate space. Selection
+            // here, at layout time, in this view's coordinate space. Overlay
             // visuals + gestures live outside the (equatable, skipped-during-
-            // drag) chart and map km↔x linearly within the visible domain.
+            // gesture) chart and map km↔x linearly within the visible domain.
             StaticProfileChart(
                 points: visiblePoints,
                 xDomain: visibleDomain,
@@ -92,9 +93,6 @@ struct ElevationProfileView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
         .onChange(of: visibleKmRange) { _, newValue in
             syncZoomedProfile(to: newValue)
-        }
-        .onDisappear {
-            autoPanTask?.cancel()
         }
     }
 
@@ -151,6 +149,19 @@ struct ElevationProfileView: View {
         }
     }
 
+    // MARK: - Measurement lifecycle
+
+    /// Places a measurement covering ~30% of the visible window around a km.
+    private func createMeasurement(atKm center: Double) {
+        guard maxKm > 0 else { return }
+        let window = visibleDomain
+        let span = Swift.max((window.upperBound - window.lowerBound) * 0.3, 0.04)
+        guard span < maxKm else { return }
+        let lower = Swift.max(0, Swift.min(center - span / 2, maxKm - span))
+        selectedKmRange = lower...(lower + span)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
     // MARK: - Mini-map row (shown while zoomed: zoom controls + context + drag-to-pan)
 
     @ViewBuilder
@@ -165,54 +176,54 @@ struct ElevationProfileView: View {
 
     private var miniMapStrip: some View {
         GeometryReader { geometry in
-                let width = geometry.size.width
-                ZStack(alignment: .topLeading) {
-                    MiniProfilePath(profile: displayProfile, maxDistance: linearized.totalDistance)
-                        .stroke(Color.secondary.opacity(0.55), lineWidth: 1)
-                    if let window = visibleKmRange {
-                        let x0 = window.lowerBound / maxKm * width
-                        let x1 = window.upperBound / maxKm * width
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Color.orange.opacity(0.18))
-                            .strokeBorder(Color.orange, lineWidth: 1)
-                            .frame(width: max(10, x1 - x0), height: geometry.size.height)
-                            .offset(x: x0)
-                    }
+            let width = geometry.size.width
+            ZStack(alignment: .topLeading) {
+                MiniProfilePath(profile: displayProfile, maxDistance: linearized.totalDistance)
+                    .stroke(Color.secondary.opacity(0.55), lineWidth: 1)
+                if let window = visibleKmRange {
+                    let x0 = window.lowerBound / maxKm * width
+                    let x1 = window.upperBound / maxKm * width
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.orange.opacity(0.18))
+                        .strokeBorder(Color.orange, lineWidth: 1)
+                        .frame(width: max(10, x1 - x0), height: geometry.size.height)
+                        .offset(x: x0)
                 }
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { drag in
-                            guard let current = visibleKmRange, width > 0 else { return }
-                            let span = current.upperBound - current.lowerBound
-                            let touchKm = Double(drag.location.x / width) * maxKm
-                            // Grabbing the window drags it like a scrollbar
-                            // thumb (relative); touching outside jumps there.
-                            if miniMapGrabOffsetKm == nil {
-                                let center = (current.lowerBound + current.upperBound) / 2
-                                let insideWindow = current.contains(touchKm)
-                                miniMapGrabOffsetKm = insideWindow ? center - touchKm : 0
-                            }
-                            var center = touchKm + (miniMapGrabOffsetKm ?? 0)
-                            center = Swift.min(maxKm - span / 2, Swift.max(span / 2, center))
-                            // Quantized so a slow drag emits a handful of
-                            // window updates per second, not sixty.
-                            let step = span / 100
-                            let lower = ((center - span / 2) / step).rounded() * step
-                            let window = lower...(lower + span)
-                            if window != current {
-                                setZoom(window)
-                            }
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        guard let current = visibleKmRange, width > 0 else { return }
+                        let span = current.upperBound - current.lowerBound
+                        let touchKm = Double(drag.location.x / width) * maxKm
+                        // Grabbing the window drags it like a scrollbar
+                        // thumb (relative); touching outside jumps there.
+                        if miniMapGrabOffsetKm == nil {
+                            let center = (current.lowerBound + current.upperBound) / 2
+                            let insideWindow = current.contains(touchKm)
+                            miniMapGrabOffsetKm = insideWindow ? center - touchKm : 0
                         }
-                        .onEnded { _ in
-                            miniMapGrabOffsetKm = nil
+                        var center = touchKm + (miniMapGrabOffsetKm ?? 0)
+                        center = Swift.min(maxKm - span / 2, Swift.max(span / 2, center))
+                        // Quantized so a slow drag emits a handful of
+                        // window updates per second, not sixty.
+                        let step = span / 100
+                        let lower = ((center - span / 2) / step).rounded() * step
+                        let window = lower...(lower + span)
+                        if window != current {
+                            setZoom(window)
                         }
-                )
+                    }
+                    .onEnded { _ in
+                        miniMapGrabOffsetKm = nil
+                    }
+            )
         }
         .frame(height: 18)
     }
 
-    // MARK: - Selection overlay (band, handles, gestures)
+    // MARK: - Chart overlay (measurement visuals + navigation gestures)
 
     private func kmToX(_ km: Double, plot: CGRect) -> CGFloat {
         let domain = visibleDomain
@@ -255,12 +266,126 @@ struct ElevationProfileView: View {
         .gesture(dragGesture(plot: plotFrame))
         .simultaneousGesture(doubleTapGesture(plot: plotFrame))
         .simultaneousGesture(magnifyGesture(plot: plotFrame))
+        .simultaneousGesture(longPressGesture(plot: plotFrame))
     }
 
-    /// Two-finger pinch: continuous zoom anchored at the pinch location —
-    /// the selection-free way in. Quantized (1% of span) so a pinch emits a
-    /// handful of chart re-renders, not sixty per second. Pinching out past
-    /// the full extent resets the zoom.
+    @ViewBuilder
+    private func edgeMarker(atX x: CGFloat, plot plotFrame: CGRect) -> some View {
+        Rectangle()
+            .fill(.orange)
+            .frame(width: 1.5, height: plotFrame.height)
+            .offset(x: x, y: plotFrame.minY)
+        Circle()
+            .fill(.orange)
+            .stroke(.white, lineWidth: 2)
+            .frame(width: 13, height: 13)
+            .offset(x: x - 6, y: plotFrame.midY - 6.5)
+    }
+
+    /// Drag = adjust a handle when it starts on one, otherwise PAN the window.
+    private func dragGesture(plot plotFrame: CGRect) -> some Gesture {
+        DragGesture(minimumDistance: 4)
+            .onChanged { drag in
+                guard plotFrame.width > 0, maxKm > 0, pinchStart == nil, !longPressCreated
+                else { return }
+
+                if dragMode == nil {
+                    if let selection = selectedKmRange,
+                        abs(drag.startLocation.x - kmToX(selection.lowerBound, plot: plotFrame))
+                            < Self.handleGrabWidth
+                    {
+                        dragMode = .adjustLower
+                    } else if let selection = selectedKmRange,
+                        abs(drag.startLocation.x - kmToX(selection.upperBound, plot: plotFrame))
+                            < Self.handleGrabWidth
+                    {
+                        dragMode = .adjustUpper
+                    } else {
+                        dragMode = .panning
+                        panConsumedX = 0
+                    }
+                }
+
+                switch dragMode {
+                case .adjustLower:
+                    if let selection = selectedKmRange {
+                        let newLower = min(
+                            xToKm(drag.location.x, plot: plotFrame), selection.upperBound - 0.02)
+                        selectedKmRange = max(0, newLower)...selection.upperBound
+                    }
+                case .adjustUpper:
+                    if let selection = selectedKmRange {
+                        let newUpper = max(
+                            xToKm(drag.location.x, plot: plotFrame), selection.lowerBound + 0.02)
+                        selectedKmRange = selection.lowerBound...min(maxKm, newUpper)
+                    }
+                case .panning:
+                    pan(translationX: drag.translation.width, plot: plotFrame)
+                case nil:
+                    break
+                }
+            }
+            .onEnded { _ in
+                dragMode = nil
+                panConsumedX = 0
+            }
+    }
+
+    /// Map-style pan, quantized so a drag emits a handful of window updates
+    /// per second. `panConsumedX` tracks the already-applied translation.
+    private func pan(translationX: CGFloat, plot plotFrame: CGRect) {
+        guard let window = visibleKmRange else { return }
+        let span = window.upperBound - window.lowerBound
+        let kmPerPoint = span / Double(plotFrame.width)
+        let pendingKm = -Double(translationX - panConsumedX) * kmPerPoint
+        let step = span / 150
+        let steps = (pendingKm / step).rounded(.towardZero)
+        guard steps != 0 else { return }
+        let shift = steps * step
+        let lower = Swift.max(0, Swift.min(window.lowerBound + shift, maxKm - span))
+        let applied = lower - window.lowerBound
+        guard applied != 0 else { return }
+        panConsumedX += CGFloat(-applied / kmPerPoint)
+        setZoom(lower...(lower + span))
+    }
+
+    /// Double-tap zooms in 2× at the tap point (map grammar). Zooming out is
+    /// pinch-out, the ⊖ button, or the mini-map.
+    private func doubleTapGesture(plot plotFrame: CGRect) -> some Gesture {
+        SpatialTapGesture(count: 2)
+            .onEnded { tap in
+                guard plotFrame.width > 0, maxKm > Self.minZoomSpanKm else { return }
+                let currentSpan = visibleDomain.upperBound - visibleDomain.lowerBound
+                let newSpan = Swift.max(currentSpan / 2, Self.minZoomSpanKm)
+                guard newSpan < currentSpan * 0.99 else { return }
+                let center = xToKm(tap.location.x, plot: plotFrame)
+                let lower = Swift.max(0, Swift.min(center - newSpan / 2, maxKm - newSpan))
+                setZoom(lower...(lower + newSpan))
+            }
+    }
+
+    /// Long-press places a measurement at the pressed spot (like dropping a
+    /// pin on the map). The ruler button does the same at the window center.
+    private func longPressGesture(plot plotFrame: CGRect) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.35)
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .onChanged { value in
+                guard case .second(true, let drag?) = value, !longPressCreated,
+                    plotFrame.width > 0
+                else { return }
+                longPressCreated = true
+                createMeasurement(atKm: xToKm(drag.startLocation.x, plot: plotFrame))
+            }
+            .onEnded { value in
+                if case .second(true, let drag?) = value, !longPressCreated, plotFrame.width > 0 {
+                    createMeasurement(atKm: xToKm(drag.startLocation.x, plot: plotFrame))
+                }
+                longPressCreated = false
+            }
+    }
+
+    /// Two-finger pinch: continuous zoom anchored at the pinch location.
+    /// Quantized (1% of span); pinching out past the full extent resets.
     private func magnifyGesture(plot plotFrame: CGRect) -> some Gesture {
         MagnifyGesture()
             .onChanged { value in
@@ -270,10 +395,8 @@ struct ElevationProfileView: View {
                     let anchorKm = xToKm(value.startLocation.x, plot: plotFrame)
                     let span = domain.upperBound - domain.lowerBound
                     pinchStart = (domain, (anchorKm - domain.lowerBound) / span)
-                    // A pinch cancels any in-flight selection drag.
+                    // A pinch cancels any in-flight drag.
                     dragMode = nil
-                    dragAnchorKm = nil
-                    stopAutoPan()
                 }
                 guard let start = pinchStart else { return }
                 let startSpan = start.domain.upperBound - start.domain.lowerBound
@@ -305,161 +428,13 @@ struct ElevationProfileView: View {
             }
     }
 
-    @ViewBuilder
-    private func edgeMarker(atX x: CGFloat, plot plotFrame: CGRect) -> some View {
-        Rectangle()
-            .fill(.orange)
-            .frame(width: 1.5, height: plotFrame.height)
-            .offset(x: x, y: plotFrame.minY)
-        Circle()
-            .fill(.orange)
-            .stroke(.white, lineWidth: 2)
-            .frame(width: 13, height: 13)
-            .offset(x: x - 6, y: plotFrame.midY - 6.5)
-    }
-
-    private func doubleTapGesture(plot plotFrame: CGRect) -> some Gesture {
-        SpatialTapGesture(count: 2)
-            .onEnded { tap in
-                guard plotFrame.width > 0 else { return }
-                if let selection = selectedKmRange {
-                    let x0 = kmToX(selection.lowerBound, plot: plotFrame)
-                    let x1 = kmToX(selection.upperBound, plot: plotFrame)
-                    if tap.location.x >= x0, tap.location.x <= x1 {
-                        zoomToSelection()
-                        return
-                    }
-                }
-                if visibleKmRange != nil {
-                    resetZoom()
-                } else {
-                    // Quick zoom on an empty chart: 2.5× centered on the tap.
-                    let span = max(maxKm / 2.5, Self.minZoomSpanKm)
-                    guard span < maxKm else { return }
-                    let center = xToKm(tap.location.x, plot: plotFrame)
-                    let lower = max(0, min(center - span / 2, maxKm - span))
-                    setZoom(lower...(lower + span))
-                }
-            }
-    }
-
-    private func dragGesture(plot plotFrame: CGRect) -> some Gesture {
-        DragGesture(minimumDistance: 8)
-            .onChanged { drag in
-                guard plotFrame.width > 0, maxKm > 0, pinchStart == nil else { return }
-
-                if dragMode == nil {
-                    if let selection = selectedKmRange,
-                        abs(drag.startLocation.x - kmToX(selection.lowerBound, plot: plotFrame))
-                            < Self.handleGrabWidth
-                    {
-                        dragMode = .adjustLower
-                    } else if let selection = selectedKmRange,
-                        abs(drag.startLocation.x - kmToX(selection.upperBound, plot: plotFrame))
-                            < Self.handleGrabWidth
-                    {
-                        dragMode = .adjustUpper
-                    } else {
-                        dragMode = .newRange
-                        dragAnchorKm = xToKm(drag.startLocation.x, plot: plotFrame)
-                    }
-                }
-
-                lastDragX = drag.location.x
-                lastDragPlot = plotFrame
-                applyDragEdge(atX: drag.location.x, plot: plotFrame)
-                updateAutoPan(forX: drag.location.x, plot: plotFrame)
-            }
-            .onEnded { _ in
-                dragMode = nil
-                dragAnchorKm = nil
-                stopAutoPan()
-            }
-    }
-
-    /// Applies the current drag position to the selection for the active mode.
-    /// Called from gesture ticks AND from auto-pan steps (finger stationary
-    /// at the plot edge while the domain scrolls underneath).
-    private func applyDragEdge(atX x: CGFloat, plot plotFrame: CGRect) {
-        switch dragMode {
-        case .newRange:
-            guard let anchor = dragAnchorKm else { return }
-            let current = xToKm(x, plot: plotFrame)
-            let low = min(anchor, current)
-            let high = max(anchor, current)
-            if high - low > 0.02 {
-                selectedKmRange = low...high
-            }
-        case .adjustLower:
-            if let selection = selectedKmRange {
-                let newLower = min(xToKm(x, plot: plotFrame), selection.upperBound - 0.02)
-                selectedKmRange = max(0, newLower)...selection.upperBound
-            }
-        case .adjustUpper:
-            if let selection = selectedKmRange {
-                let newUpper = max(xToKm(x, plot: plotFrame), selection.lowerBound + 0.02)
-                selectedKmRange = selection.lowerBound...min(maxKm, newUpper)
-            }
-        case nil:
-            break
-        }
-    }
-
-    // MARK: - Edge auto-pan (extend a drag past the zoomed window)
-
-    private static let autoPanEdgeZone: CGFloat = 26
-
-    private func updateAutoPan(forX x: CGFloat, plot plotFrame: CGRect) {
-        guard let window = visibleKmRange else {
-            stopAutoPan()
-            return
-        }
-        let direction: Double
-        if x > plotFrame.maxX - Self.autoPanEdgeZone, window.upperBound < maxKm {
-            direction = 1
-        } else if x < plotFrame.minX + Self.autoPanEdgeZone, window.lowerBound > 0 {
-            direction = -1
-        } else {
-            stopAutoPan()
-            return
-        }
-        guard autoPanTask == nil else { return }
-        autoPanTask = Task { @MainActor in
-            while !Task.isCancelled {
-                guard dragMode != nil, let current = visibleKmRange else { break }
-                let span = current.upperBound - current.lowerBound
-                var lower = current.lowerBound + span * 0.08 * direction
-                var upper = current.upperBound + span * 0.08 * direction
-                if lower < 0 {
-                    lower = 0
-                    upper = span
-                }
-                if upper > maxKm {
-                    upper = maxKm
-                    lower = maxKm - span
-                }
-                let shifted = lower...upper
-                guard shifted != current else { break }
-                setZoom(shifted)
-                applyDragEdge(atX: lastDragX, plot: lastDragPlot)
-                try? await Task.sleep(nanoseconds: 130_000_000)
-            }
-            autoPanTask = nil
-        }
-    }
-
-    private func stopAutoPan() {
-        autoPanTask?.cancel()
-        autoPanTask = nil
-    }
-
     // MARK: - Header
 
     @ViewBuilder
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             if let selection = selectedKmRange {
-                Text("Sélection")
+                Text("Mesure")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.orange)
                 Spacer()
@@ -475,8 +450,8 @@ struct ElevationProfileView: View {
                     selectedKmRange = nil
                 }
             } else if let window = visibleKmRange {
-                // Zoomed without a selection: the header describes the visible
-                // window, so the numbers always match what the chart shows.
+                // Zoomed without a measurement: the header describes the
+                // visible window, so the numbers always match the chart.
                 Text("\(kmLabel(window.lowerBound)) – \(kmLabel(window.upperBound)) km")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -487,6 +462,10 @@ struct ElevationProfileView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                headerButton("ruler") {
+                    let window = visibleDomain
+                    createMeasurement(atKm: (window.lowerBound + window.upperBound) / 2)
+                }
             } else {
                 Text(name ?? "Trace")
                     .font(.footnote.weight(.semibold))
@@ -497,6 +476,10 @@ struct ElevationProfileView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                headerButton("ruler") {
+                    let window = visibleDomain
+                    createMeasurement(atKm: (window.lowerBound + window.upperBound) / 2)
+                }
             }
         }
     }
@@ -530,7 +513,7 @@ struct ElevationProfileView: View {
 }
 
 /// The expensive part: area + line marks. Wrapped `.equatable()` so SwiftUI
-/// skips it entirely while only the selection (outside) changes.
+/// skips it entirely while only the overlay (outside) changes.
 private struct StaticProfileChart: View, Equatable {
     let points: [ProfilePoint]
     let xDomain: ClosedRange<Double>
