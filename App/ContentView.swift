@@ -92,8 +92,8 @@ struct ContentView: View {
         }
     }
 
-    /// Map-app-standard controls only; everything management lives in the
-    /// "Mes traces" sheet.
+    /// Map-app-standard actions only (locate, fit); occasional configuration
+    /// lives behind the overflow menu.
     private var controls: some View {
         VStack(spacing: 10) {
             if location.authorization == .denied || location.authorization == .restricted {
@@ -120,19 +120,20 @@ struct ContentView: View {
             }
 
             Menu {
-                Picker("Fond de carte", selection: $tileSourceID) {
-                    ForEach(TileSource.all) { source in
-                        Text(source.name).tag(source.id)
+                Menu("Fond de carte") {
+                    Picker("Fond de carte", selection: $tileSourceID) {
+                        ForEach(TileSource.all) { source in
+                            Text(source.name).tag(source.id)
+                        }
                     }
                 }
+                Button {
+                    showsTracePicker = true
+                } label: {
+                    Label("Mes traces…", systemImage: "folder")
+                }
             } label: {
-                controlIcon("square.3.layers.3d")
-            }
-
-            Button {
-                showsTracePicker = true
-            } label: {
-                controlIcon("folder")
+                controlIcon("ellipsis")
             }
         }
     }
