@@ -396,14 +396,7 @@ struct MapView: UIViewRepresentable {
                 style.addLayer(stroke)
             }
 
-            let first = trace?.points.first.map {
-                CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
-            }
-            let last = trace?.points.last.map {
-                CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
-            }
-            syncEndpoint(shape == nil ? nil : first, id: "trace-start", color: .systemGreen, style: style)
-            syncEndpoint(shape == nil ? nil : last, id: "trace-end", color: .systemRed, style: style)
+            syncEndpointMarkers(style: style, hidden: shape == nil)
 
             if framedTraceKey != parent.traceKey, let points = trace?.points, !points.isEmpty {
                 framedTraceKey = parent.traceKey
@@ -425,25 +418,74 @@ struct MapView: UIViewRepresentable {
             style.addLayer(layer)
         }
 
-        private func syncEndpoint(
-            _ coordinate: CLLocationCoordinate2D?, id: String, color: UIColor, style: MLNStyle
-        ) {
-            let shape: MLNShape? = coordinate.map {
-                let point = MLNPointFeature()
-                point.coordinate = $0
-                return point
+        /// Start = green flag, finish = checkered flag — distinct from the
+        /// round GPS dot. A loop (start ≈ finish) shows a single checkered
+        /// flag instead of two markers overlapping at the same point.
+        private func syncEndpointMarkers(style: MLNStyle, hidden: Bool) {
+            var startShape: MLNShape?
+            var finishShape: MLNShape?
+            if !hidden, let first = parent.trace?.points.first, let last = parent.trace?.points.last {
+                let isLoop = Geo.distanceMeters(from: first, to: last) < 150
+                let finishPoint = MLNPointFeature()
+                finishPoint.coordinate = CLLocationCoordinate2D(
+                    latitude: last.latitude, longitude: last.longitude)
+                finishShape = finishPoint
+                if !isLoop {
+                    let startPoint = MLNPointFeature()
+                    startPoint.coordinate = CLLocationCoordinate2D(
+                        latitude: first.latitude, longitude: first.longitude)
+                    startShape = startPoint
+                }
             }
+            syncMarker(
+                id: "trace-start", shape: startShape, symbol: "flag.fill",
+                colors: [.systemGreen], style: style)
+            syncMarker(
+                id: "trace-end", shape: finishShape, symbol: "flag.checkered",
+                colors: [.black, .white], style: style)
+        }
+
+        private func syncMarker(
+            id: String, shape: MLNShape?, symbol: String, colors: [UIColor], style: MLNStyle
+        ) {
             if let source = style.source(withIdentifier: id) as? MLNShapeSource {
                 source.shape = shape
             } else if shape != nil {
+                if let image = Self.badgeImage(symbol: symbol, colors: colors) {
+                    style.setImage(image, forName: "\(id)-icon")
+                }
                 let source = MLNShapeSource(identifier: id, shape: shape)
                 style.addSource(source)
-                let circle = MLNCircleStyleLayer(identifier: id, source: source)
-                circle.circleColor = NSExpression(forConstantValue: color)
-                circle.circleRadius = NSExpression(forConstantValue: 7)
-                circle.circleStrokeColor = NSExpression(forConstantValue: UIColor.white)
-                circle.circleStrokeWidth = NSExpression(forConstantValue: 2.5)
-                style.addLayer(circle)
+                let layer = MLNSymbolStyleLayer(identifier: id, source: source)
+                layer.iconImageName = NSExpression(forConstantValue: "\(id)-icon")
+                layer.iconAllowsOverlap = NSExpression(forConstantValue: true)
+                style.addLayer(layer)
+            }
+        }
+
+        /// SF symbol rasterized onto a white round badge. Drawing into a
+        /// bitmap guarantees real pixels — template/palette symbols passed
+        /// straight to MapLibre render as black silhouettes.
+        private static func badgeImage(symbol: String, colors: [UIColor]) -> UIImage? {
+            let configuration = UIImage.SymbolConfiguration(pointSize: 13, weight: .bold)
+                .applying(UIImage.SymbolConfiguration(paletteColors: colors))
+            guard let glyph = UIImage(systemName: symbol, withConfiguration: configuration) else {
+                return nil
+            }
+            let diameter: CGFloat = 26
+            let size = CGSize(width: diameter, height: diameter)
+            return UIGraphicsImageRenderer(size: size).image { context in
+                let circle = CGRect(origin: .zero, size: size)
+                UIColor.white.setFill()
+                context.cgContext.fillEllipse(in: circle.insetBy(dx: 1, dy: 1))
+                UIColor.systemGray3.setStroke()
+                context.cgContext.setLineWidth(1)
+                context.cgContext.strokeEllipse(in: circle.insetBy(dx: 1.5, dy: 1.5))
+                glyph.draw(
+                    in: CGRect(
+                        x: (diameter - glyph.size.width) / 2,
+                        y: (diameter - glyph.size.height) / 2,
+                        width: glyph.size.width, height: glyph.size.height))
             }
         }
 
