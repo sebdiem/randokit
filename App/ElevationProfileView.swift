@@ -26,6 +26,8 @@ struct ElevationProfileView: View {
     @State private var lastDragX: CGFloat = 0
     @State private var lastDragPlot: CGRect = .zero
     @State private var autoPanTask: Task<Void, Never>?
+    @State private var pinchStart: (domain: ClosedRange<Double>, anchorFraction: Double)?
+    @State private var miniMapGrabOffsetKm: Double?
 
     private enum DragMode {
         case newRange
@@ -48,8 +50,11 @@ struct ElevationProfileView: View {
         zoomedProfile ?? displayProfile
     }
 
+    /// Always derived from the FULL trace: a given slope must look equally
+    /// steep at every zoom level and pan position. Adaptive y-scaling reads
+    /// as higher resolution but actually distorts gradient perception.
     private var elevationDomain: ClosedRange<Double> {
-        let elevations = visiblePoints.map(\.elevation)
+        let elevations = displayProfile.map(\.elevation)
         guard let min = elevations.min(), let max = elevations.max() else {
             return 0...1000
         }
@@ -180,7 +185,15 @@ struct ElevationProfileView: View {
                         .onChanged { drag in
                             guard let current = visibleKmRange, width > 0 else { return }
                             let span = current.upperBound - current.lowerBound
-                            var center = Double(drag.location.x / width) * maxKm
+                            let touchKm = Double(drag.location.x / width) * maxKm
+                            // Grabbing the window drags it like a scrollbar
+                            // thumb (relative); touching outside jumps there.
+                            if miniMapGrabOffsetKm == nil {
+                                let center = (current.lowerBound + current.upperBound) / 2
+                                let insideWindow = current.contains(touchKm)
+                                miniMapGrabOffsetKm = insideWindow ? center - touchKm : 0
+                            }
+                            var center = touchKm + (miniMapGrabOffsetKm ?? 0)
                             center = Swift.min(maxKm - span / 2, Swift.max(span / 2, center))
                             // Quantized so a slow drag emits a handful of
                             // window updates per second, not sixty.
@@ -190,6 +203,9 @@ struct ElevationProfileView: View {
                             if window != current {
                                 setZoom(window)
                             }
+                        }
+                        .onEnded { _ in
+                            miniMapGrabOffsetKm = nil
                         }
                 )
         }
@@ -238,6 +254,55 @@ struct ElevationProfileView: View {
         .contentShape(Rectangle())
         .gesture(dragGesture(plot: plotFrame))
         .simultaneousGesture(doubleTapGesture(plot: plotFrame))
+        .simultaneousGesture(magnifyGesture(plot: plotFrame))
+    }
+
+    /// Two-finger pinch: continuous zoom anchored at the pinch location —
+    /// the selection-free way in. Quantized (1% of span) so a pinch emits a
+    /// handful of chart re-renders, not sixty per second. Pinching out past
+    /// the full extent resets the zoom.
+    private func magnifyGesture(plot plotFrame: CGRect) -> some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                guard plotFrame.width > 0, maxKm > Self.minZoomSpanKm else { return }
+                if pinchStart == nil {
+                    let domain = visibleDomain
+                    let anchorKm = xToKm(value.startLocation.x, plot: plotFrame)
+                    let span = domain.upperBound - domain.lowerBound
+                    pinchStart = (domain, (anchorKm - domain.lowerBound) / span)
+                    // A pinch cancels any in-flight selection drag.
+                    dragMode = nil
+                    dragAnchorKm = nil
+                    stopAutoPan()
+                }
+                guard let start = pinchStart else { return }
+                let startSpan = start.domain.upperBound - start.domain.lowerBound
+                let startAnchorKm = start.domain.lowerBound + start.anchorFraction * startSpan
+                let magnification = max(0.01, Double(value.magnification))
+                var newSpan = startSpan / magnification
+                if newSpan >= maxKm * 0.995 {
+                    if visibleKmRange != nil {
+                        setZoom(nil)
+                    }
+                    return
+                }
+                newSpan = max(Self.minZoomSpanKm, min(newSpan, maxKm))
+                var lower = startAnchorKm - start.anchorFraction * newSpan
+                lower = max(0, min(lower, maxKm - newSpan))
+                let target = lower...(lower + newSpan)
+                if let current = visibleKmRange {
+                    let tolerance = (current.upperBound - current.lowerBound) * 0.01
+                    if abs(target.lowerBound - current.lowerBound) < tolerance,
+                        abs(target.upperBound - current.upperBound) < tolerance
+                    {
+                        return
+                    }
+                }
+                setZoom(target)
+            }
+            .onEnded { _ in
+                pinchStart = nil
+            }
     }
 
     @ViewBuilder
@@ -267,6 +332,13 @@ struct ElevationProfileView: View {
                 }
                 if visibleKmRange != nil {
                     resetZoom()
+                } else {
+                    // Quick zoom on an empty chart: 2.5× centered on the tap.
+                    let span = max(maxKm / 2.5, Self.minZoomSpanKm)
+                    guard span < maxKm else { return }
+                    let center = xToKm(tap.location.x, plot: plotFrame)
+                    let lower = max(0, min(center - span / 2, maxKm - span))
+                    setZoom(lower...(lower + span))
                 }
             }
     }
@@ -274,7 +346,7 @@ struct ElevationProfileView: View {
     private func dragGesture(plot plotFrame: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { drag in
-                guard plotFrame.width > 0, maxKm > 0 else { return }
+                guard plotFrame.width > 0, maxKm > 0, pinchStart == nil else { return }
 
                 if dragMode == nil {
                     if let selection = selectedKmRange,
