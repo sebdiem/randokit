@@ -116,31 +116,6 @@ struct ElevationProfileView: View {
 
     // MARK: - Zoom
 
-    private func zoomTarget(for selection: ClosedRange<Double>) -> ClosedRange<Double>? {
-        guard maxKm > 0 else { return nil }
-        let center = (selection.lowerBound + selection.upperBound) / 2
-        let halfSpan =
-            Swift.max((selection.upperBound - selection.lowerBound) * 1.2, Self.minZoomSpanKm) / 2
-        let lower = Swift.max(0, center - halfSpan)
-        let upper = Swift.min(maxKm, center + halfSpan)
-        guard upper > lower else { return nil }
-        return lower...upper
-    }
-
-    /// Recovery affordance: only offered when the measurement is partly or
-    /// fully outside the visible window.
-    private var measurementIsOffscreen: Bool {
-        guard let selection = selectedKmRange, visibleKmRange != nil else { return false }
-        let domain = visibleDomain
-        return selection.lowerBound < domain.lowerBound - 0.001
-            || selection.upperBound > domain.upperBound + 0.001
-    }
-
-    private func showMeasurement() {
-        guard let selection = selectedKmRange, let target = zoomTarget(for: selection) else { return }
-        setZoom(target)
-    }
-
     private func resetZoom() {
         setZoom(nil)
     }
@@ -303,12 +278,6 @@ struct ElevationProfileView: View {
                     if rawX1 <= plotFrame.maxX {
                         edgeMarker(atX: rawX1 - 1.5, plot: plotFrame)
                     }
-                }
-                // Offscreen measurement indicator at the relevant edge.
-                if rawX1 < plotFrame.minX {
-                    edgeIndicator("chevron.left", color: .orange, x: plotFrame.minX + 12, plot: plotFrame)
-                } else if rawX0 > plotFrame.maxX {
-                    edgeIndicator("chevron.right", color: .orange, x: plotFrame.maxX - 12, plot: plotFrame)
                 }
             }
             // GPS position: a dot ON the curve at the projected km/elevation,
@@ -658,10 +627,6 @@ struct ElevationProfileView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
-
-            if measurementIsOffscreen {
-                headerButton("viewfinder", label: "Afficher la mesure", action: showMeasurement)
-            }
 
             if selectedKmRange != nil {
                 headerButton("xmark.circle.fill", label: "Supprimer la mesure") {
