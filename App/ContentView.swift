@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var showsFileImporter = false
     @State private var selectionCoordinates: [CLLocationCoordinate2D] = []
     @State private var visibleKmRange: ClosedRange<Double>?
+    @State private var cameraCommand: MapCameraCommand?
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -24,7 +25,8 @@ struct ContentView: View {
                 traceKey: library.active?.entryID ?? "none",
                 selectionCoordinates: selectionCoordinates,
                 positionCoordinate: location.lastFix?.coordinate,
-                positionColor: positionColor
+                positionColor: positionColor,
+                cameraCommand: cameraCommand
             )
             .ignoresSafeArea()
 
@@ -90,8 +92,33 @@ struct ContentView: View {
         }
     }
 
+    /// Map-app-standard controls only; everything management lives in the
+    /// "Mes traces" sheet.
     private var controls: some View {
         VStack(spacing: 10) {
+            if location.authorization == .denied || location.authorization == .restricted {
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                } label: {
+                    controlIcon("location.slash")
+                        .foregroundStyle(.red)
+                }
+            } else {
+                Button {
+                    cameraCommand = MapCameraCommand(kind: .centerOnUser)
+                } label: {
+                    controlIcon("location")
+                }
+            }
+
+            Button {
+                cameraCommand = MapCameraCommand(kind: .fitTrace)
+            } label: {
+                controlIcon("arrow.up.left.and.arrow.down.right")
+            }
+
             Menu {
                 Picker("Fond de carte", selection: $tileSourceID) {
                     ForEach(TileSource.all) { source in
@@ -99,7 +126,7 @@ struct ContentView: View {
                     }
                 }
             } label: {
-                controlIcon("map")
+                controlIcon("square.3.layers.3d")
             }
 
             Button {
@@ -107,73 +134,82 @@ struct ContentView: View {
             } label: {
                 controlIcon("folder")
             }
-
-            if library.isImporting {
-                ProgressView()
-                    .padding(11)
-                    .background(.regularMaterial, in: Circle())
-            }
-
-            if let progress = downloader.progress {
-                Text("\(Int(progress * 100)) %")
-                    .font(.footnote.monospacedDigit().weight(.semibold))
-                    .padding(8)
-                    .background(.regularMaterial, in: Capsule())
-            } else if let active = library.active {
-                Button {
-                    Task {
-                        await downloader.download(
-                            trace: active.trace, source: .withID(tileSourceID))
-                    }
-                } label: {
-                    controlIcon("arrow.down.circle")
-                }
-            }
-
-            if location.authorization == .denied || location.authorization == .restricted {
-                Button {
-                    if let url = URL(string: UIApplication.openSettingsURLString) {
-                        UIApplication.shared.open(url)
-                    }
-                } label: {
-                    Image(systemName: "location.slash")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(.red)
-                        .padding(11)
-                        .background(.regularMaterial, in: Circle())
-                }
-            }
         }
     }
 
     private func controlIcon(_ systemName: String) -> some View {
         Image(systemName: systemName)
             .font(.system(size: 18, weight: .medium))
-            .padding(11)
+            .frame(width: 44, height: 44)
             .background(.regularMaterial, in: Circle())
     }
 
+    /// "Mes traces": selection, import, per-trace offline download, deletion.
     private var tracePicker: some View {
         NavigationStack {
             List {
-                ForEach(library.entries) { entry in
-                    Button {
-                        library.select(entry)
-                        showsTracePicker = false
-                    } label: {
-                        HStack {
-                            Text(entry.name)
-                                .foregroundStyle(.primary)
-                            Spacer()
-                            if entry.id == library.active?.entryID {
-                                Image(systemName: "checkmark")
-                                    .foregroundStyle(.tint)
-                            }
+                if library.isImporting {
+                    Section {
+                        HStack(spacing: 12) {
+                            ProgressView()
+                            Text("Import et correction des altitudes…")
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }
+                if let progress = downloader.progress {
+                    Section {
+                        ProgressView(value: progress) {
+                            Text("Téléchargement des fonds de carte… \(Int(progress * 100)) %")
+                                .font(.footnote)
+                        }
+                    }
+                } else if let result = downloader.lastResult {
+                    Section {
+                        Text(result)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section {
+                    ForEach(library.entries) { entry in
+                        Button {
+                            library.select(entry)
+                            showsTracePicker = false
+                        } label: {
+                            HStack {
+                                Text(entry.name)
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                Spacer()
+                                if entry.id == library.active?.entryID {
+                                    Image(systemName: "checkmark")
+                                        .foregroundStyle(.tint)
+                                }
+                            }
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            if entry.url != nil {
+                                Button(role: .destructive) {
+                                    library.delete(entry)
+                                } label: {
+                                    Label("Supprimer", systemImage: "trash")
+                                }
+                            }
+                            Button {
+                                downloadTiles(for: entry)
+                            } label: {
+                                Label("Hors-ligne", systemImage: "arrow.down.circle")
+                            }
+                            .tint(.blue)
+                        }
+                    }
+                } footer: {
+                    Text("Balayez une trace pour télécharger ses fonds de carte ou la supprimer.")
+                }
             }
-            .navigationTitle("Traces")
+            .navigationTitle("Mes traces")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
@@ -184,7 +220,15 @@ struct ContentView: View {
                 }
             }
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
+    }
+
+    private func downloadTiles(for entry: TraceLibrary.Entry) {
+        Task {
+            if let trace = await library.loadTrace(for: entry) {
+                await downloader.download(trace: trace, source: .withID(tileSourceID))
+            }
+        }
     }
 
     /// Dot color is the whole off-track UI: blue on track, red off, gray
@@ -290,6 +334,16 @@ enum SampleTrace {
     }()
 }
 
+struct MapCameraCommand: Equatable {
+    enum Kind {
+        case centerOnUser
+        case fitTrace
+    }
+
+    let kind: Kind
+    let token = UUID()
+}
+
 struct MapView: UIViewRepresentable {
     let tileSource: TileSource
     let trace: GPXTrace?
@@ -297,6 +351,7 @@ struct MapView: UIViewRepresentable {
     let selectionCoordinates: [CLLocationCoordinate2D]
     let positionCoordinate: CLLocationCoordinate2D?
     let positionColor: UIColor
+    let cameraCommand: MapCameraCommand?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -305,6 +360,10 @@ struct MapView: UIViewRepresentable {
     func makeUIView(context: Context) -> MLNMapView {
         let view = MLNMapView(frame: .zero)
         view.delegate = context.coordinator
+        // Top-left, where no overlay control will ever cover it (the button
+        // stack lives top-right).
+        view.compassViewPosition = .topLeft
+        view.compassViewMargins = CGPoint(x: 12, y: 12)
         // Chamonix fallback while there's no trace to frame.
         view.setCenter(
             CLLocationCoordinate2D(latitude: 45.9237, longitude: 6.8694),
@@ -317,6 +376,7 @@ struct MapView: UIViewRepresentable {
         context.coordinator.parent = self
         apply(tileSource, to: view)
         context.coordinator.syncAll(on: view)
+        context.coordinator.handleCameraCommand(on: view)
     }
 
     private func apply(_ source: TileSource, to view: MLNMapView) {
@@ -333,6 +393,7 @@ struct MapView: UIViewRepresentable {
         private var syncedTraceKey: String?
         private var syncedSelectionKey: String?
         private var syncedPositionKey: String?
+        private var handledCameraToken: UUID?
 
         init(_ parent: MapView) {
             self.parent = parent
@@ -352,6 +413,26 @@ struct MapView: UIViewRepresentable {
             syncTrace(on: mapView)
             syncSelection(on: mapView)
             syncPosition(on: mapView)
+        }
+
+        func handleCameraCommand(on mapView: MLNMapView) {
+            guard let command = parent.cameraCommand, command.token != handledCameraToken
+            else { return }
+            handledCameraToken = command.token
+            switch command.kind {
+            case .centerOnUser:
+                if let coordinate = parent.positionCoordinate {
+                    mapView.setCenter(
+                        coordinate, zoomLevel: max(mapView.zoomLevel, 14), animated: true)
+                }
+            case .fitTrace:
+                if let points = parent.trace?.points, !points.isEmpty {
+                    frame(
+                        coordinates: points.map {
+                            CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+                        }, on: mapView, animated: true)
+                }
+            }
         }
 
         /// Rebuilds trace geometry only when the active trace (or the style)
@@ -560,7 +641,9 @@ struct MapView: UIViewRepresentable {
             }
         }
 
-        private func frame(coordinates: [CLLocationCoordinate2D], on mapView: MLNMapView) {
+        private func frame(
+            coordinates: [CLLocationCoordinate2D], on mapView: MLNMapView, animated: Bool = false
+        ) {
             guard let first = coordinates.first else { return }
             var bounds = MLNCoordinateBounds(sw: first, ne: first)
             for coordinate in coordinates {
@@ -572,7 +655,7 @@ struct MapView: UIViewRepresentable {
             mapView.setVisibleCoordinateBounds(
                 bounds,
                 edgePadding: UIEdgeInsets(top: 80, left: 50, bottom: 80, right: 50),
-                animated: false, completionHandler: nil)
+                animated: animated, completionHandler: nil)
         }
     }
 }

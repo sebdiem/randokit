@@ -81,6 +81,21 @@ final class TraceLibrary: ObservableObject {
             projector: TraceProjector(trace: trace))
     }
 
+    /// Loads a trace without selecting it (e.g. to download its tiles).
+    func loadTrace(for entry: Entry) async -> GPXTrace? {
+        await Task.detached(priority: .userInitiated) { Self.load(entry)?.trace }.value
+    }
+
+    /// Deletes a file-backed trace; falls back to the first entry if it was active.
+    func delete(_ entry: Entry) {
+        guard let url = entry.url else { return }
+        try? FileManager.default.removeItem(at: url)
+        refresh()
+        if active?.entryID == entry.id, let first = entries.first {
+            select(first)
+        }
+    }
+
     /// Full import pipeline: read → parse → correct elevations against the
     /// IGN DEM (best effort) → persist as GPX in Documents → select.
     func importGPX(from url: URL) async {
