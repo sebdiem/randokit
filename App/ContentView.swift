@@ -431,6 +431,11 @@ struct ContentView: View {
             if let tapPreset = env["PRESET_TAP_KM"].flatMap(Double.init) {
                 selectPoint(atKm: tapPreset)
             }
+            if env["LOG_WAYPOINTS"] == "1", let active = library.active {
+                for mark in active.waypointMarks {
+                    NSLog("RANDO wpt %@ km %.3f", mark.name ?? "?", mark.km)
+                }
+            }
             if let zoomPreset = env["PRESET_ZOOM"], let active = library.active {
                 let maxKm = active.linearized.totalDistance / 1000
                 if zoomPreset == "1", let selection = selectedKmRange {
@@ -599,6 +604,9 @@ struct MapView: UIViewRepresentable {
                     forConstantValue: UIColor(red: 0.56, green: 0.14, blue: 0.67, alpha: 1))
                 layer.circleStrokeWidth = NSExpression(forConstantValue: 3)
                 style.addLayer(layer)
+                // Created lazily on the first tap: re-canonicalize so the
+                // ring sits BELOW the pins, not on top of everything.
+                raiseOverlayLayers(in: style)
             }
         }
 
@@ -898,6 +906,7 @@ struct MapView: UIViewRepresentable {
                 layer.circleStrokeColor = NSExpression(forConstantValue: UIColor.white)
                 layer.circleStrokeWidth = NSExpression(forConstantValue: 3)
                 style.addLayer(layer)
+                raiseOverlayLayers(in: style)
             }
         }
 
