@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Rando fixture" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata><name>La Flégère → Lac Blanc</name></metadata>
+  <wpt lat="45.9614" lon="6.8871"><ele>1877</ele><name>La Flégère</name></wpt>
+  <wpt lat="45.9801" lon="6.8859"><ele>2352</ele><name>Refuge du Lac Blanc</name></wpt>
+  <trk>
+    <name>La Flégère → Lac Blanc</name>
+    <trkseg>
+      <trkpt lat="45.9614" lon="6.8871"><ele>1877</ele></trkpt>
+      <trkpt lat="45.9625" lon="6.8880"><ele>1890</ele></trkpt>
+      <trkpt lat="45.9634" lon="6.8894"><ele>1905</ele></trkpt>
+      <trkpt lat="45.9641" lon="6.8910"><ele>1920</ele></trkpt>
+      <trkpt lat="45.9650" lon="6.8922"><ele>1938</ele></trkpt>
+      <trkpt lat="45.9660" lon="6.8930"><ele>1955</ele></trkpt>
+      <trkpt lat="45.9670" lon="6.8935"><ele>1972</ele></trkpt>
+      <trkpt lat="45.9678" lon="6.8927"><ele>1990</ele></trkpt>
+      <trkpt lat="45.9684" lon="6.8915"><ele>2008</ele></trkpt>
+      <trkpt lat="45.9692" lon="6.8905"><ele>2025</ele></trkpt>
+      <trkpt lat="45.9701" lon="6.8898"><ele>2042</ele></trkpt>
+      <trkpt lat="45.9710" lon="6.8892"><ele>2060</ele></trkpt>
+      <trkpt lat="45.9718" lon="6.8885"><ele>2078</ele></trkpt>
+      <trkpt lat="45.9725" lon="6.8878"><ele>2096</ele></trkpt>
+      <trkpt lat="45.9731" lon="6.8868"><ele>2115</ele></trkpt>
+      <trkpt lat="45.9736" lon="6.8858"><ele>2133</ele></trkpt>
+      <trkpt lat="45.9742" lon="6.8850"><ele>2152</ele></trkpt>
+      <trkpt lat="45.9749" lon="6.8845"><ele>2170</ele></trkpt>
+      <trkpt lat="45.9756" lon="6.8842"><ele>2190</ele></trkpt>
+      <trkpt lat="45.9762" lon="6.8838"><ele>2208</ele></trkpt>
+      <trkpt lat="45.9768" lon="6.8836"><ele>2226</ele></trkpt>
+      <trkpt lat="45.9774" lon="6.8838"><ele>2245</ele></trkpt>
+      <trkpt lat="45.9779" lon="6.8842"><ele>2263</ele></trkpt>
+      <trkpt lat="45.9784" lon="6.8848"><ele>2280</ele></trkpt>
+      <trkpt lat="45.9789" lon="6.8853"><ele>2298</ele></trkpt>
+      <trkpt lat="45.9793" lon="6.8857"><ele>2315</ele></trkpt>
+      <trkpt lat="45.9796" lon="6.8860"><ele>2330</ele></trkpt>
+      <trkpt lat="45.9799" lon="6.8861"><ele>2345</ele></trkpt>
+      <trkpt lat="45.9801" lon="6.8859"><ele>2352</ele></trkpt>
+    </trkseg>
+  </trk>
+</gpx>
