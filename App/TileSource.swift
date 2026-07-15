@@ -1,4 +1,5 @@
 import Foundation
+import RandoKit
 
 /// A raster basemap the map can render. Everything downstream (style JSON,
 /// offline downloads, cache keys) hangs off this description.
@@ -36,6 +37,15 @@ struct TileSource: Identifiable, Equatable {
         all.first { $0.id == id } ?? .ignPlanV2
     }
 
+    /// The real network URL for one tile (used by the read-through cache).
+    func remoteURL(for tile: Tile) -> URL? {
+        URL(
+            string: tileURLTemplate
+                .replacingOccurrences(of: "{z}", with: String(tile.z))
+                .replacingOccurrences(of: "{x}", with: String(tile.x))
+                .replacingOccurrences(of: "{y}", with: String(tile.y)))
+    }
+
     /// Minimal MapLibre style: one raster source, one raster layer.
     private var styleDictionary: [String: Any] {
         [
@@ -44,7 +54,8 @@ struct TileSource: Identifiable, Equatable {
             "sources": [
                 "base": [
                     "type": "raster",
-                    "tiles": [tileURLTemplate],
+                    // All tile traffic goes through TileURLProtocol (read-through cache).
+                    "tiles": ["\(TileURLProtocol.scheme)://\(id)/{z}/{x}/{y}"],
                     "tileSize": tileSize,
                     "maxzoom": maxZoom,
                     "attribution": attribution,

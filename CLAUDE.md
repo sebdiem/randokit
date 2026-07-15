@@ -43,3 +43,18 @@ xcrun devicectl device install app --device <UDID> <path to Rando.app>
 
 Simulator GPS: `simctl location <device> start|set` or a GPX-driven scenario — use for testing
 position-on-trace behavior headlessly.
+
+## Offline tiles
+
+All map tiles flow through `rando-tile://<source>/{z}/{x}/{y}` → `TileURLProtocol` →
+`TileStore` (SQLite, MBTiles-like, permanent) with network fallback that persists
+every fetched tile. Inspect it:
+
+```sh
+DB="$(xcrun simctl get_app_container 'iPhone 16' dev.seb.Rando data)/Library/Application Support/tiles.sqlite"
+sqlite3 "$DB" 'SELECT source, z, COUNT(*) FROM tiles GROUP BY source, z;'
+```
+
+DEBUG env hooks (prefix with SIMCTL_CHILD_ for simctl launch): `AUTO_DOWNLOAD=1` starts the
+corridor download at launch, `OFFLINE_ONLY=1` disables tile networking (offline proof),
+`PRESET_SELECTION="0.8-1.8"` presets a profile selection in km.

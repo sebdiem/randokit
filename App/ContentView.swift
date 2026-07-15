@@ -5,6 +5,7 @@ import SwiftUI
 struct ContentView: View {
     @AppStorage("tileSourceID") private var tileSourceID = TileSource.ignPlanV2.id
     @State private var selectedKmRange: ClosedRange<Double>?
+    @StateObject private var downloader = CorridorDownloader()
     private let trace = SampleTrace.trace
     private let linearized = SampleTrace.trace.map { LinearizedTrace(trackPoints: $0.points) }
 
@@ -24,17 +25,38 @@ struct ContentView: View {
             )
             .ignoresSafeArea()
 
-            Menu {
-                Picker("Fond de carte", selection: $tileSourceID) {
-                    ForEach(TileSource.all) { source in
-                        Text(source.name).tag(source.id)
+            VStack(spacing: 10) {
+                Menu {
+                    Picker("Fond de carte", selection: $tileSourceID) {
+                        ForEach(TileSource.all) { source in
+                            Text(source.name).tag(source.id)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "map")
+                        .font(.system(size: 18, weight: .medium))
+                        .padding(11)
+                        .background(.regularMaterial, in: Circle())
+                }
+
+                if let progress = downloader.progress {
+                    Text("\(Int(progress * 100)) %")
+                        .font(.footnote.monospacedDigit().weight(.semibold))
+                        .padding(8)
+                        .background(.regularMaterial, in: Capsule())
+                } else if let trace {
+                    Button {
+                        Task {
+                            await downloader.download(
+                                points: trace.points, source: .withID(tileSourceID))
+                        }
+                    } label: {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(size: 18, weight: .medium))
+                            .padding(11)
+                            .background(.regularMaterial, in: Circle())
                     }
                 }
-            } label: {
-                Image(systemName: "map")
-                    .font(.system(size: 18, weight: .medium))
-                    .padding(11)
-                    .background(.regularMaterial, in: Circle())
             }
             .padding(.trailing, 12)
         }
@@ -59,6 +81,12 @@ struct ContentView: View {
                 let parts = preset.split(separator: "-").compactMap { Double($0) }
                 if parts.count == 2, parts[0] < parts[1] {
                     selectedKmRange = parts[0]...parts[1]
+                }
+            }
+            // Headless verification: start the corridor download at launch.
+            if ProcessInfo.processInfo.environment["AUTO_DOWNLOAD"] == "1", let trace {
+                Task {
+                    await downloader.download(points: trace.points, source: .withID(tileSourceID))
                 }
             }
         #endif
