@@ -36,7 +36,9 @@ struct ContentView: View {
                     name: active.trace.name, linearized: active.linearized,
                     displayProfile: active.displayProfile,
                     selectedKmRange: $selectedKmRange,
-                    currentKm: currentProjection.map { $0.distanceAlong / 1000 },
+                    // Quantized to 25 m so the chart (whose position marker is
+                    // a mark) doesn't re-render on every 5 m GPS fix.
+                    currentKm: currentProjection.map { ($0.distanceAlong / 25).rounded() * 25 / 1000 },
                     positionIsOnTrack: monitor.status == .onTrack
                 )
                 .frame(height: 200)
@@ -313,6 +315,7 @@ struct MapView: UIViewRepresentable {
         private var framedTraceKey: String?
         private var syncedTraceKey: String?
         private var syncedSelectionKey: String?
+        private var syncedPositionKey: String?
 
         init(_ parent: MapView) {
             self.parent = parent
@@ -323,6 +326,7 @@ struct MapView: UIViewRepresentable {
         func mapView(_ mapView: MLNMapView, didFinishLoading style: MLNStyle) {
             syncedTraceKey = nil
             syncedSelectionKey = nil
+            syncedPositionKey = nil
             syncAll(on: mapView)
         }
 
@@ -455,6 +459,12 @@ struct MapView: UIViewRepresentable {
         /// GPS dot, always topmost. Color carries the off-track state.
         func syncPosition(on mapView: MLNMapView) {
             guard let style = mapView.style else { return }
+
+            let key = parent.positionCoordinate.map {
+                "\($0.latitude),\($0.longitude),\(parent.positionColor)"
+            } ?? "none"
+            guard key != syncedPositionKey else { return }
+            syncedPositionKey = key
 
             let shape: MLNShape? = parent.positionCoordinate.map { coordinate in
                 let point = MLNPointFeature()
