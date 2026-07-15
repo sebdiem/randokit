@@ -21,8 +21,16 @@ public struct TraceProjection: Equatable, Sendable {
 public struct TraceProjector: Sendable {
     public let trackPoints: [TrackPoint]
     public let cumulativeDistances: [Double]
+    /// Segment indices i whose (i, i+1) pair crosses a GPX segment boundary —
+    /// artificial connections that must never receive a projection.
+    private let boundaryBreaks: Set<Int>
 
     public init(trackPoints: [TrackPoint]) {
+        self.init(trace: GPXTrace(points: trackPoints))
+    }
+
+    public init(trace: GPXTrace) {
+        let trackPoints = trace.points
         self.trackPoints = trackPoints
         var cumulative: [Double] = []
         cumulative.reserveCapacity(trackPoints.count)
@@ -34,6 +42,11 @@ public struct TraceProjector: Sendable {
             cumulative.append(total)
         }
         self.cumulativeDistances = cumulative
+        var breaks = Set<Int>()
+        for range in trace.segmentRanges where range.upperBound < trackPoints.count {
+            breaks.insert(range.upperBound - 1)
+        }
+        self.boundaryBreaks = breaks
     }
 
     public var totalDistance: Double { cumulativeDistances.last ?? 0 }
@@ -66,7 +79,7 @@ public struct TraceProjector: Sendable {
         }
 
         var best: TraceProjection?
-        for index in segments {
+        for index in segments where !boundaryBreaks.contains(index) {
             let a = planeXY(trackPoints[index])
             let b = planeXY(trackPoints[index + 1])
             let dx = b.x - a.x
@@ -90,5 +103,46 @@ public struct TraceProjector: Sendable {
             return project(latitude: latitude, longitude: longitude, nearSegment: nil)
         }
         return best
+    }
+
+    /// Interpolated position at a distance-along value (clamped to the trace).
+    public func coordinate(atDistance distance: Double) -> (latitude: Double, longitude: Double)? {
+        guard let first = trackPoints.first, let last = trackPoints.last else { return nil }
+        if distance <= 0 { return (first.latitude, first.longitude) }
+        if distance >= totalDistance { return (last.latitude, last.longitude) }
+        guard let upper = cumulativeDistances.firstIndex(where: { $0 >= distance }), upper > 0
+        else { return (first.latitude, first.longitude) }
+        let lower = upper - 1
+        let span = cumulativeDistances[upper] - cumulativeDistances[lower]
+        let t = span > 0 ? (distance - cumulativeDistances[lower]) / span : 0
+        let a = trackPoints[lower]
+        let b = trackPoints[upper]
+        return (
+            a.latitude + t * (b.latitude - a.latitude),
+            a.longitude + t * (b.longitude - a.longitude)
+        )
+    }
+
+    /// Coordinates of the trace slice between two distance-along values, with
+    /// interpolated endpoints — always at least two coordinates for a
+    /// non-empty range, even between two samples.
+    public func sliceCoordinates(
+        in range: ClosedRange<Double>
+    ) -> [(latitude: Double, longitude: Double)] {
+        guard trackPoints.count >= 2, range.upperBound > range.lowerBound else { return [] }
+        var result: [(latitude: Double, longitude: Double)] = []
+        if let start = coordinate(atDistance: range.lowerBound) {
+            result.append(start)
+        }
+        for (index, point) in trackPoints.enumerated()
+        where cumulativeDistances[index] > range.lowerBound
+            && cumulativeDistances[index] < range.upperBound
+        {
+            result.append((point.latitude, point.longitude))
+        }
+        if let end = coordinate(atDistance: range.upperBound) {
+            result.append(end)
+        }
+        return result
     }
 }

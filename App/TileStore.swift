@@ -29,7 +29,7 @@ final class TileStore: @unchecked Sendable {
             throw NSError(domain: "TileStore", code: 1)
         }
         db = handle
-        sqlite3_exec(
+        let schemaResult = sqlite3_exec(
             db,
             """
             PRAGMA journal_mode=WAL;
@@ -42,6 +42,10 @@ final class TileStore: @unchecked Sendable {
             ) WITHOUT ROWID;
             """,
             nil, nil, nil)
+        guard schemaResult == SQLITE_OK else {
+            sqlite3_close(handle)
+            throw NSError(domain: "TileStore", code: 2)
+        }
     }
 
     func data(source: String, tile: Tile) -> Data? {
@@ -64,11 +68,28 @@ final class TileStore: @unchecked Sendable {
         }
     }
 
+    /// Existence check without loading the tile blob.
     func contains(source: String, tile: Tile) -> Bool {
-        data(source: source, tile: tile) != nil
+        queue.sync {
+            var statement: OpaquePointer?
+            defer { sqlite3_finalize(statement) }
+            guard
+                sqlite3_prepare_v2(
+                    db, "SELECT 1 FROM tiles WHERE source=? AND z=? AND x=? AND y=? LIMIT 1",
+                    -1, &statement, nil) == SQLITE_OK
+            else { return false }
+            sqlite3_bind_text(statement, 1, source, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(statement, 2, Int32(tile.z))
+            sqlite3_bind_int(statement, 3, Int32(tile.x))
+            sqlite3_bind_int(statement, 4, Int32(tile.y))
+            return sqlite3_step(statement) == SQLITE_ROW
+        }
     }
 
-    func insert(source: String, tile: Tile, data: Data) {
+    /// Returns whether the row was actually committed — callers tracking
+    /// offline coverage must not count a tile on a failed write.
+    @discardableResult
+    func insert(source: String, tile: Tile, data: Data) -> Bool {
         queue.sync {
             var statement: OpaquePointer?
             defer { sqlite3_finalize(statement) }
@@ -77,7 +98,7 @@ final class TileStore: @unchecked Sendable {
                     db,
                     "INSERT OR REPLACE INTO tiles(source,z,x,y,data,fetched_at) VALUES(?,?,?,?,?,?)",
                     -1, &statement, nil) == SQLITE_OK
-            else { return }
+            else { return false }
             sqlite3_bind_text(statement, 1, source, -1, SQLITE_TRANSIENT)
             sqlite3_bind_int(statement, 2, Int32(tile.z))
             sqlite3_bind_int(statement, 3, Int32(tile.x))
@@ -87,7 +108,7 @@ final class TileStore: @unchecked Sendable {
                     statement, 5, bytes.baseAddress, Int32(bytes.count), SQLITE_TRANSIENT)
             }
             sqlite3_bind_int64(statement, 6, Int64(Date().timeIntervalSince1970))
-            _ = sqlite3_step(statement)
+            return sqlite3_step(statement) == SQLITE_DONE
         }
     }
 

@@ -3,7 +3,11 @@ import Foundation
 /// Serializes a trace back to GPX 1.1 — used to persist imported traces
 /// (with corrected elevations) and, later, edited ones.
 public struct GPXWriter {
-    private let iso = ISO8601DateFormatter()
+    private let iso: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     public init() {}
 
@@ -30,18 +34,21 @@ public struct GPXWriter {
         if let name = trace.name {
             xml += "    <name>\(escape(name))</name>\n"
         }
-        xml += "    <trkseg>\n"
-        for point in trace.points {
-            xml += "      <trkpt lat=\"\(format(point.latitude))\" lon=\"\(format(point.longitude))\">"
-            if let elevation = point.elevation {
-                xml += "<ele>\(format(elevation))</ele>"
+        for range in trace.segmentRanges {
+            xml += "    <trkseg>\n"
+            for point in trace.points[range] {
+                xml += "      <trkpt lat=\"\(format(point.latitude))\" lon=\"\(format(point.longitude))\">"
+                if let elevation = point.elevation {
+                    xml += "<ele>\(format(elevation))</ele>"
+                }
+                if let time = point.time {
+                    xml += "<time>\(iso.string(from: time))</time>"
+                }
+                xml += "</trkpt>\n"
             }
-            if let time = point.time {
-                xml += "<time>\(iso.string(from: time))</time>"
-            }
-            xml += "</trkpt>\n"
+            xml += "    </trkseg>\n"
         }
-        xml += "    </trkseg>\n  </trk>\n</gpx>\n"
+        xml += "  </trk>\n</gpx>\n"
         return xml
     }
 

@@ -34,15 +34,40 @@ public enum TileMath {
     }
 
     /// All tiles covering a corridor of `bufferMeters` around the track,
-    /// for every zoom in `zooms`. Built as the union of per-point buffered
-    /// boxes, so it follows the trace instead of its whole bounding box.
+    /// for every zoom in `zooms`. Built as the union of buffered boxes around
+    /// sample positions densified along each segment, so sparsely recorded
+    /// traces stay covered between points. Segment boundaries are respected:
+    /// nothing is downloaded along the artificial gap between segments.
     public static func corridorTiles(
-        around points: [TrackPoint], bufferMeters: Double, zooms: ClosedRange<Int>
+        around trace: GPXTrace, bufferMeters: Double, zooms: ClosedRange<Int>
     ) -> Set<Tile> {
+        var samples: [TrackPoint] = []
+        let spacing = max(bufferMeters / 2, 50)
+        for range in trace.segmentRanges {
+            let segment = trace.points[range]
+            for (a, b) in zip(segment, segment.dropFirst()) {
+                samples.append(a)
+                let length = Geo.distanceMeters(from: a, to: b)
+                if length > spacing {
+                    let steps = Int(length / spacing)
+                    for step in 1...steps {
+                        let t = Double(step) / Double(steps + 1)
+                        samples.append(
+                            TrackPoint(
+                                latitude: a.latitude + t * (b.latitude - a.latitude),
+                                longitude: a.longitude + t * (b.longitude - a.longitude)))
+                    }
+                }
+            }
+            if let lastPoint = segment.last {
+                samples.append(lastPoint)
+            }
+        }
+
         var tiles = Set<Tile>()
         let metersPerDegreeLat = 111_320.0
         for zoom in zooms.lowerBound...zooms.upperBound {
-            for point in points {
+            for point in samples {
                 let dLat = bufferMeters / metersPerDegreeLat
                 let dLon = bufferMeters / (metersPerDegreeLat * cos(point.latitude * .pi / 180))
                 let southWest = tile(

@@ -20,7 +20,17 @@ extension LinearizedTrace {
     ) -> ElevationStats {
         let slice: [ProfilePoint]
         if let range {
-            slice = points.filter { range.contains($0.distance) }
+            // Interpolated boundary points so that a range falling between
+            // two samples still measures the elevation change across it.
+            var built: [ProfilePoint] = []
+            if let start = elevation(atDistance: range.lowerBound) {
+                built.append(ProfilePoint(distance: range.lowerBound, elevation: start))
+            }
+            built += points.filter { $0.distance > range.lowerBound && $0.distance < range.upperBound }
+            if let end = elevation(atDistance: range.upperBound) {
+                built.append(ProfilePoint(distance: range.upperBound, elevation: end))
+            }
+            slice = built
         } else {
             slice = points
         }
@@ -38,5 +48,19 @@ extension LinearizedTrace {
             }
         }
         return stats
+    }
+
+    /// Linearly interpolated elevation at a distance-along value (clamped).
+    public func elevation(atDistance distance: Double) -> Double? {
+        guard let first = points.first, let last = points.last else { return nil }
+        if distance <= first.distance { return first.elevation }
+        if distance >= last.distance { return last.elevation }
+        guard let upper = points.firstIndex(where: { $0.distance >= distance }), upper > 0
+        else { return first.elevation }
+        let a = points[upper - 1]
+        let b = points[upper]
+        let span = b.distance - a.distance
+        let t = span > 0 ? (distance - a.distance) / span : 0
+        return a.elevation + t * (b.elevation - a.elevation)
     }
 }

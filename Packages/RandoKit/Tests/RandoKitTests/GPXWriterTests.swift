@@ -10,7 +10,7 @@ struct GPXWriterTests {
             points: [
                 TrackPoint(
                     latitude: 45.9614, longitude: 6.8871, elevation: 1872.78,
-                    time: Date(timeIntervalSince1970: 1_780_000_000)),
+                    time: Date(timeIntervalSince1970: 1_780_000_000.25)),
                 TrackPoint(latitude: 45.9718, longitude: 6.8885, elevation: 2120.18),
                 TrackPoint(latitude: 45.9801, longitude: 6.8859),
             ],
@@ -36,5 +36,19 @@ struct GPXWriterTests {
         let xml = GPXWriter().write(trace)
         #expect(!xml.contains("<ele>"))
         #expect(xml.contains("lat=\"45\""))
+    }
+
+    @Test func roundTripPreservesSegmentBoundaries() throws {
+        let original = GPXTrace(
+            name: "Deux tronçons",
+            points: [
+                TrackPoint(latitude: 45.00, longitude: 6.0),
+                TrackPoint(latitude: 45.01, longitude: 6.0),
+                TrackPoint(latitude: 45.05, longitude: 6.1),
+                TrackPoint(latitude: 45.06, longitude: 6.1),
+            ],
+            segmentRanges: [0..<2, 2..<4])
+        let reparsed = try GPXParser().parse(GPXWriter().write(original))
+        #expect(reparsed.segmentRanges == original.segmentRanges)
     }
 }

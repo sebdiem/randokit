@@ -33,6 +33,19 @@ struct GPXParserTests {
         #expect(trace.points[2].elevation == nil)
     }
 
+    @Test func preservesSegmentBoundaries() throws {
+        let trace = try GPXParser().parse(sampleGPX)
+        #expect(trace.segmentRanges == [0..<2, 2..<3])
+    }
+
+    @Test func rejectsSinglePointTrace() {
+        #expect(throws: GPXError.noTrack) {
+            try GPXParser().parse(
+                "<gpx version=\"1.1\"><trk><trkseg><trkpt lat=\"45\" lon=\"6\"></trkpt></trkseg></trk></gpx>"
+            )
+        }
+    }
+
     @Test func parsesMetadataNameFirst() throws {
         let trace = try GPXParser().parse(sampleGPX)
         #expect(trace.name == "Tour du Lac")

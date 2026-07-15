@@ -11,19 +11,24 @@ final class CorridorDownloader: ObservableObject {
     static let bufferMeters = 1000.0
     static let zooms = 10...16
 
-    func download(points: [TrackPoint], source: TileSource) async {
+    func download(trace: GPXTrace, source: TileSource) async {
         guard progress == nil, let store = TileStore.shared else { return }
         progress = 0
 
         let zooms = Self.zooms.lowerBound...min(Self.zooms.upperBound, source.maxZoom)
-        let wanted = TileMath.corridorTiles(
-            around: points, bufferMeters: Self.bufferMeters, zooms: zooms)
-        let missing = wanted
-            .filter { !store.contains(source: source.id, tile: $0) }
-            .sorted { ($0.z, $0.x, $0.y) < ($1.z, $1.x, $1.y) }
+        // Corridor planning + cache lookups off the main thread.
+        let (missing, wantedCount) = await Task.detached(priority: .userInitiated) {
+            () -> ([Tile], Int) in
+            let wanted = TileMath.corridorTiles(
+                around: trace, bufferMeters: Self.bufferMeters, zooms: zooms)
+            let missing = wanted
+                .filter { !store.contains(source: source.id, tile: $0) }
+                .sorted { ($0.z, $0.x, $0.y) < ($1.z, $1.x, $1.y) }
+            return (missing, wanted.count)
+        }.value
 
         guard !missing.isEmpty else {
-            lastResult = "Déjà hors-ligne (\(wanted.count) tuiles)"
+            lastResult = "Déjà hors-ligne (\(wantedCount) tuiles)"
             progress = nil
             return
         }
@@ -37,7 +42,7 @@ final class CorridorDownloader: ObservableObject {
             func enqueueNext() {
                 guard let tile = iterator.next() else { return }
                 group.addTask {
-                    await Self.fetch(tile: tile, source: source, into: store)
+                    await Self.fetchAndStore(tile: tile, source: source, into: store)
                 }
             }
             enqueueNext()
@@ -56,7 +61,8 @@ final class CorridorDownloader: ObservableObject {
         progress = nil
     }
 
-    private nonisolated static func fetch(
+    /// True only if the tile was fetched AND committed to the store.
+    private nonisolated static func fetchAndStore(
         tile: Tile, source: TileSource, into store: TileStore
     ) async -> Bool {
         guard let url = source.remoteURL(for: tile) else { return false }
@@ -65,7 +71,6 @@ final class CorridorDownloader: ObservableObject {
         guard let (data, response) = try? await URLSession.shared.data(for: request),
             (response as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty
         else { return false }
-        store.insert(source: source.id, tile: tile, data: data)
-        return true
+        return store.insert(source: source.id, tile: tile, data: data)
     }
 }

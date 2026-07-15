@@ -30,12 +30,21 @@ public struct Waypoint: Equatable, Sendable {
 
 public struct GPXTrace: Equatable, Sendable {
     public var name: String?
+    /// All track points in file order, all segments concatenated.
     public var points: [TrackPoint]
+    /// Index ranges into `points`, one per `<trkseg>`/`<rte>`. Consecutive
+    /// segments are NOT connected: no line, distance, or projection may
+    /// cross a boundary.
+    public var segmentRanges: [Range<Int>]
     public var waypoints: [Waypoint]
 
-    public init(name: String? = nil, points: [TrackPoint] = [], waypoints: [Waypoint] = []) {
+    public init(
+        name: String? = nil, points: [TrackPoint] = [],
+        segmentRanges: [Range<Int>]? = nil, waypoints: [Waypoint] = []
+    ) {
         self.name = name
         self.points = points
+        self.segmentRanges = segmentRanges ?? (points.isEmpty ? [] : [0..<points.count])
         self.waypoints = waypoints
     }
 }
@@ -57,10 +66,18 @@ public struct GPXParser {
         guard parser.parse() else {
             throw GPXError.malformedXML(line: parser.lineNumber)
         }
-        guard !delegate.points.isEmpty else {
+        guard delegate.points.count >= 2 else {
             throw GPXError.noTrack
         }
-        return GPXTrace(name: delegate.traceName, points: delegate.points, waypoints: delegate.waypoints)
+        // Fall back to a single segment if the file had points outside any
+        // recognized container (defensive; not valid GPX).
+        var ranges = delegate.segmentRanges
+        if ranges.reduce(0, { $0 + $1.count }) != delegate.points.count {
+            ranges = [0..<delegate.points.count]
+        }
+        return GPXTrace(
+            name: delegate.traceName, points: delegate.points,
+            segmentRanges: ranges, waypoints: delegate.waypoints)
     }
 
     public func parse(_ string: String) throws -> GPXTrace {
@@ -70,8 +87,10 @@ public struct GPXParser {
     private final class Delegate: NSObject, XMLParserDelegate {
         var traceName: String?
         var points: [TrackPoint] = []
+        var segmentRanges: [Range<Int>] = []
         var waypoints: [Waypoint] = []
 
+        private var segmentStart: Int?
         private var text = ""
         private var pending: (lat: Double, lon: Double)?
         private var pendingIsWaypoint = false
@@ -94,8 +113,13 @@ public struct GPXParser {
         ) {
             text = ""
             switch elementName {
-            case "trk", "rte":
+            case "trk":
                 inTrackOrRoute = true
+            case "rte":
+                inTrackOrRoute = true
+                segmentStart = points.count
+            case "trkseg":
+                segmentStart = points.count
             case "metadata":
                 inMetadata = true
             case "trkpt", "rtept", "wpt":
@@ -146,7 +170,12 @@ public struct GPXParser {
                         Waypoint(latitude: p.lat, longitude: p.lon, name: pendingName, elevation: pendingElevation))
                 }
                 pending = nil
-            case "trk", "rte":
+            case "trkseg":
+                closeSegment()
+            case "trk":
+                inTrackOrRoute = false
+            case "rte":
+                closeSegment()
                 inTrackOrRoute = false
             case "metadata":
                 inMetadata = false
@@ -154,6 +183,13 @@ public struct GPXParser {
                 break
             }
             text = ""
+        }
+
+        private func closeSegment() {
+            if let start = segmentStart, points.count > start {
+                segmentRanges.append(start..<points.count)
+            }
+            segmentStart = nil
         }
     }
 }

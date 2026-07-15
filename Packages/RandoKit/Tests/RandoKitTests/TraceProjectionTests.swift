@@ -46,6 +46,33 @@ struct TraceProjectionTests {
         let projection = try #require(projector.project(latitude: 45.0035, longitude: 6.0))
         #expect(projection.crossTrackDistance < 0.5)
     }
+
+    @Test func neverProjectsOntoSegmentBoundaryGap() throws {
+        // Two parallel disconnected segments ~1.5 km apart. A position midway
+        // between them must project onto a real segment, not the artificial
+        // connecting line (whose cross-track distance would be ~0).
+        let trace = GPXTrace(
+            points: [
+                TrackPoint(latitude: 45.000, longitude: 6.00),
+                TrackPoint(latitude: 45.002, longitude: 6.00),
+                TrackPoint(latitude: 45.002, longitude: 6.02),
+                TrackPoint(latitude: 45.000, longitude: 6.02),
+            ],
+            segmentRanges: [0..<2, 2..<4])
+        let projector = TraceProjector(trace: trace)
+        let projection = try #require(projector.project(latitude: 45.001, longitude: 6.01))
+        #expect(projection.crossTrackDistance > 700)
+    }
+
+    @Test func sliceCoordinatesInterpolatesEndpoints() throws {
+        let projector = TraceProjector(trackPoints: straightTrace)
+        // A range strictly between two samples (~111 m apart) still yields a
+        // two-coordinate slice.
+        let slice = projector.sliceCoordinates(in: 30...80)
+        #expect(slice.count == 2)
+        #expect(abs(slice[0].latitude - (45.0 + 30 / 111_195.0)) < 0.0001)
+        #expect(abs(slice[1].latitude - (45.0 + 80 / 111_195.0)) < 0.0001)
+    }
 }
 
 struct OffTrackMonitorTests {

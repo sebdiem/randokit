@@ -25,7 +25,6 @@ final class TraceLibrary: ObservableObject {
     @Published var importMessage: String?
 
     private static let sampleID = "sample"
-    private let parser = GPXParser()
 
     init() {
         refresh()
@@ -52,19 +51,30 @@ final class TraceLibrary: ObservableObject {
     }
 
     func select(_ entry: Entry) {
+        Task { await selectAsync(entry) }
+    }
+
+    private func selectAsync(_ entry: Entry) async {
+        // File IO, XML parsing, and the O(n) derived models stay off-main.
+        guard let loaded = await Task.detached(priority: .userInitiated, operation: { Self.load(entry) }).value
+        else { return }
+        active = loaded
+        UserDefaults.standard.set(entry.id, forKey: "activeTraceID")
+    }
+
+    private nonisolated static func load(_ entry: Entry) -> Active? {
         let trace: GPXTrace?
         if let url = entry.url {
-            trace = (try? Data(contentsOf: url)).flatMap { try? parser.parse($0) }
+            trace = (try? Data(contentsOf: url)).flatMap { try? GPXParser().parse($0) }
         } else {
             trace = SampleTrace.trace
         }
-        guard let trace else { return }
-        active = Active(
+        guard let trace, trace.points.count >= 2 else { return nil }
+        return Active(
             entryID: entry.id,
             trace: trace,
             linearized: LinearizedTrace(trackPoints: trace.points),
-            projector: TraceProjector(trackPoints: trace.points))
-        UserDefaults.standard.set(entry.id, forKey: "activeTraceID")
+            projector: TraceProjector(trace: trace))
     }
 
     /// Full import pipeline: read → parse → correct elevations against the
@@ -73,11 +83,15 @@ final class TraceLibrary: ObservableObject {
         isImporting = true
         defer { isImporting = false }
 
-        let secured = url.startAccessingSecurityScopedResource()
-        let data = try? Data(contentsOf: url)
-        if secured { url.stopAccessingSecurityScopedResource() }
-
-        guard let data, var trace = try? parser.parse(data) else {
+        let parsed = await Task.detached(priority: .userInitiated) { () -> GPXTrace? in
+            let secured = url.startAccessingSecurityScopedResource()
+            defer {
+                if secured { url.stopAccessingSecurityScopedResource() }
+            }
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return try? GPXParser().parse(data)
+        }.value
+        guard var trace = parsed else {
             importMessage = "Fichier GPX illisible"
             return
         }
@@ -94,9 +108,12 @@ final class TraceLibrary: ObservableObject {
             fileURL = documentsDirectory.appendingPathComponent("\(baseName)-\(suffix).gpx")
             suffix += 1
         }
-        do {
-            try GPXWriter().write(corrected).write(to: fileURL, atomically: true, encoding: .utf8)
-        } catch {
+        let content = GPXWriter().write(corrected)
+        let destination = fileURL
+        let saved = await Task.detached {
+            (try? content.write(to: destination, atomically: true, encoding: .utf8)) != nil
+        }.value
+        guard saved else {
             importMessage = "Échec de l'enregistrement"
             return
         }

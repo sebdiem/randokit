@@ -11,8 +11,13 @@ struct ElevationProfileView: View {
 
     private var elevationDomain: ClosedRange<Double> {
         let elevations = linearized.points.map(\.elevation)
-        guard let min = elevations.min(), let max = elevations.max(), min < max else {
+        guard let min = elevations.min(), let max = elevations.max() else {
             return 0...1000
+        }
+        // Flat traces get a small window centered on their elevation instead
+        // of a domain that would clip them out of view entirely.
+        guard max - min >= 10 else {
+            return (min - 25)...(max + 25)
         }
         let margin = (max - min) * 0.12
         return (min - margin)...(max + margin)

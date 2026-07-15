@@ -10,7 +10,7 @@ packages:
     path: Packages/RandoKit
   MapLibre:
     url: https://github.com/maplibre/maplibre-gl-native-distribution
-    from: 6.0.0
+    exactVersion: 6.27.0
 
 targets:
   Rando:
@@ -38,6 +38,8 @@ targets:
           - UIInterfaceOrientationPortrait
         NSLocationWhenInUseUsageDescription: Rando shows your position on the map and along your hiking trace.
         ITSAppUsesNonExemptEncryption: false
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         CFBundleDocumentTypes:
           - CFBundleTypeName: GPX track
             LSHandlerRank: Alternate

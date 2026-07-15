@@ -13,14 +13,7 @@ struct ContentView: View {
     @State private var currentProjection: TraceProjection?
     @State private var showsTracePicker = false
     @State private var showsFileImporter = false
-
-    private var selectionCoordinates: [CLLocationCoordinate2D] {
-        guard let active = library.active, let kmRange = selectedKmRange else { return [] }
-        let meters = (kmRange.lowerBound * 1000)...(kmRange.upperBound * 1000)
-        return zip(active.trace.points, active.linearized.points)
-            .filter { meters.contains($0.1.distance) }
-            .map { CLLocationCoordinate2D(latitude: $0.0.latitude, longitude: $0.0.longitude) }
-    }
+    @State private var selectionCoordinates: [CLLocationCoordinate2D] = []
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -71,8 +64,16 @@ struct ContentView: View {
         ) {
             Button("OK") { library.importMessage = nil }
         }
-        .onChange(of: library.active?.entryID) {
+        .onChange(of: library.active?.entryID) { oldValue, _ in
             resetTracking()
+            // Trace activation is async; hooks that need an active trace run
+            // after the first activation, not at onAppear.
+            if oldValue == nil {
+                applyPostActivationDebugHooks()
+            }
+        }
+        .onChange(of: selectedKmRange) {
+            updateSelectionCoordinates()
         }
         .onAppear(perform: applyDebugHooks)
         .onAppear {
@@ -116,10 +117,24 @@ struct ContentView: View {
                 Button {
                     Task {
                         await downloader.download(
-                            points: active.trace.points, source: .withID(tileSourceID))
+                            trace: active.trace, source: .withID(tileSourceID))
                     }
                 } label: {
                     controlIcon("arrow.down.circle")
+                }
+            }
+
+            if location.authorization == .denied || location.authorization == .restricted {
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                } label: {
+                    Image(systemName: "location.slash")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(.red)
+                        .padding(11)
+                        .background(.regularMaterial, in: Circle())
                 }
             }
         }
@@ -181,6 +196,19 @@ struct ContentView: View {
         monitor = OffTrackMonitor(dwell: dwell)
         currentProjection = nil
         selectedKmRange = nil
+        selectionCoordinates = []
+    }
+
+    /// Recomputed only when the selection changes (not on every GPS fix);
+    /// endpoints are interpolated so even a between-samples range highlights.
+    private func updateSelectionCoordinates() {
+        guard let projector = library.active?.projector, let kmRange = selectedKmRange else {
+            selectionCoordinates = []
+            return
+        }
+        selectionCoordinates = projector
+            .sliceCoordinates(in: (kmRange.lowerBound * 1000)...(kmRange.upperBound * 1000))
+            .map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
     }
 
     private func handle(_ fix: CLLocation?) {
@@ -198,6 +226,18 @@ struct ContentView: View {
     private func applyDebugHooks() {
         #if DEBUG
             let env = ProcessInfo.processInfo.environment
+            if let dwell = env["OFFTRACK_DWELL"].flatMap(Double.init) {
+                monitor.dwell = dwell
+            }
+            if let path = env["IMPORT_GPX"] {
+                Task { await library.importGPX(from: URL(fileURLWithPath: path)) }
+            }
+        #endif
+    }
+
+    private func applyPostActivationDebugHooks() {
+        #if DEBUG
+            let env = ProcessInfo.processInfo.environment
             if let preset = env["PRESET_SELECTION"] {
                 let parts = preset.split(separator: "-").compactMap { Double($0) }
                 if parts.count == 2, parts[0] < parts[1] {
@@ -206,15 +246,8 @@ struct ContentView: View {
             }
             if env["AUTO_DOWNLOAD"] == "1", let active = library.active {
                 Task {
-                    await downloader.download(
-                        points: active.trace.points, source: .withID(tileSourceID))
+                    await downloader.download(trace: active.trace, source: .withID(tileSourceID))
                 }
-            }
-            if let dwell = env["OFFTRACK_DWELL"].flatMap(Double.init) {
-                monitor.dwell = dwell
-            }
-            if let path = env["IMPORT_GPX"] {
-                Task { await library.importGPX(from: URL(fileURLWithPath: path)) }
             }
         #endif
     }
@@ -269,6 +302,8 @@ struct MapView: UIViewRepresentable {
     final class Coordinator: NSObject, MLNMapViewDelegate {
         var parent: MapView
         private var framedTraceKey: String?
+        private var syncedTraceKey: String?
+        private var syncedSelectionKey: String?
 
         init(_ parent: MapView) {
             self.parent = parent
@@ -277,6 +312,8 @@ struct MapView: UIViewRepresentable {
         // Fires after every style load, including basemap switches (which wipe
         // all runtime layers) — everything is re-synced from scratch here.
         func mapView(_ mapView: MLNMapView, didFinishLoading style: MLNStyle) {
+            syncedTraceKey = nil
+            syncedSelectionKey = nil
             syncAll(on: mapView)
         }
 
@@ -287,18 +324,30 @@ struct MapView: UIViewRepresentable {
             syncPosition(on: mapView)
         }
 
+        /// Rebuilds trace geometry only when the active trace (or the style)
+        /// actually changed — position updates arrive every few meters and
+        /// must not touch this. One polyline per GPX segment: disconnected
+        /// segments render disconnected.
         private func syncTrace(on mapView: MLNMapView) {
             guard let style = mapView.style else { return }
-            guard let points = parent.trace?.points, points.count >= 2 else { return }
-            let coordinates = points.map {
-                CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+            guard syncedTraceKey != parent.traceKey else { return }
+            syncedTraceKey = parent.traceKey
+
+            let trace = parent.trace
+            let polylines: [MLNPolyline] = (trace?.segmentRanges ?? []).compactMap { range in
+                guard range.count >= 2, let points = trace?.points[range] else { return nil }
+                let coordinates = points.map {
+                    CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+                }
+                return MLNPolylineFeature(coordinates: coordinates, count: UInt(coordinates.count))
             }
-            let line = MLNPolylineFeature(coordinates: coordinates, count: UInt(coordinates.count))
+            let shape: MLNShape? =
+                polylines.isEmpty ? nil : MLNMultiPolylineFeature(polylines: polylines)
 
             if let source = style.source(withIdentifier: "trace") as? MLNShapeSource {
-                source.shape = line
-            } else {
-                let source = MLNShapeSource(identifier: "trace", shape: line)
+                source.shape = shape
+            } else if shape != nil {
+                let source = MLNShapeSource(identifier: "trace", shape: shape)
                 style.addSource(source)
 
                 let casing = MLNLineStyleLayer(identifier: "trace-casing", source: source)
@@ -317,24 +366,36 @@ struct MapView: UIViewRepresentable {
                 style.addLayer(stroke)
             }
 
-            syncEndpoint(coordinates.first!, id: "trace-start", color: .systemGreen, style: style)
-            syncEndpoint(coordinates.last!, id: "trace-end", color: .systemRed, style: style)
+            let first = trace?.points.first.map {
+                CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+            }
+            let last = trace?.points.last.map {
+                CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+            }
+            syncEndpoint(shape == nil ? nil : first, id: "trace-start", color: .systemGreen, style: style)
+            syncEndpoint(shape == nil ? nil : last, id: "trace-end", color: .systemRed, style: style)
 
-            if framedTraceKey != parent.traceKey {
+            if framedTraceKey != parent.traceKey, let points = trace?.points, !points.isEmpty {
                 framedTraceKey = parent.traceKey
-                frame(coordinates: coordinates, on: mapView)
+                frame(
+                    coordinates: points.map {
+                        CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+                    }, on: mapView)
             }
         }
 
         private func syncEndpoint(
-            _ coordinate: CLLocationCoordinate2D, id: String, color: UIColor, style: MLNStyle
+            _ coordinate: CLLocationCoordinate2D?, id: String, color: UIColor, style: MLNStyle
         ) {
-            let point = MLNPointFeature()
-            point.coordinate = coordinate
+            let shape: MLNShape? = coordinate.map {
+                let point = MLNPointFeature()
+                point.coordinate = $0
+                return point
+            }
             if let source = style.source(withIdentifier: id) as? MLNShapeSource {
-                source.shape = point
-            } else {
-                let source = MLNShapeSource(identifier: id, shape: point)
+                source.shape = shape
+            } else if shape != nil {
+                let source = MLNShapeSource(identifier: id, shape: shape)
                 style.addSource(source)
                 let circle = MLNCircleStyleLayer(identifier: id, source: source)
                 circle.circleColor = NSExpression(forConstantValue: color)
@@ -346,10 +407,18 @@ struct MapView: UIViewRepresentable {
         }
 
         /// Keeps the orange "measured segment" overlay in sync with the profile
-        /// selection. The source is created once and its shape updated in place.
+        /// selection. The source is created once and its shape updated in place;
+        /// skipped entirely while the selection is unchanged.
         func syncSelection(on mapView: MLNMapView) {
             guard let style = mapView.style else { return }
             let coordinates = parent.selectionCoordinates
+
+            let key = coordinates.isEmpty
+                ? "none"
+                : "\(coordinates.count)-\(coordinates[0].latitude)-\(coordinates[0].longitude)"
+                    + "-\(coordinates[coordinates.count - 1].latitude)-\(coordinates[coordinates.count - 1].longitude)"
+            guard key != syncedSelectionKey else { return }
+            syncedSelectionKey = key
 
             let shape: MLNShape? =
                 coordinates.count >= 2

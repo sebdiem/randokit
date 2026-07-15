@@ -41,4 +41,12 @@ struct ElevationStatsTests {
         let stats = LinearizedTrace(trackPoints: []).elevationStats()
         #expect(stats == ElevationStats())
     }
+
+    @Test func rangeBetweenTwoSamplesInterpolates() {
+        // Samples every ~100 m climbing 100 m: a 30–80 m range contains no
+        // sample, but the interpolated boundaries measure the partial climb.
+        let stats = profile([1000, 1100]).elevationStats(in: 30...80, threshold: 3)
+        #expect(abs(stats.gain - 50 * 100 / 100.07) < 1)
+        #expect(stats.loss == 0)
+    }
 }
