@@ -45,6 +45,14 @@ xcrun simctl install booted DerivedData/.../Rando.app
 xcrun simctl launch booted dev.seb.Rando
 
 # Deploy to Seb's iPhone (needs signing set up in Local.xcconfig, device in Developer Mode)
+xcodebuild \
+  -project Rando.xcodeproj \
+  -scheme Rando \
+  -configuration Debug \
+  -destination 'generic/platform=iOS' \
+  -derivedDataPath ./build \
+  -allowProvisioningUpdates \
+  build
 xcrun devicectl list devices
 xcrun devicectl device install app --device <UDID> <path to Rando.app>
 ```
