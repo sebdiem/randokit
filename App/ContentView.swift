@@ -603,7 +603,9 @@ struct MapView: UIViewRepresentable {
         /// images survive offline — text labels would need remote font
         /// glyphs — so names are revealed by the tap-info interaction.
         private func syncWaypointPins(style: MLNStyle) {
-            let features = parent.waypoints.map { waypoint -> MLNPointFeature in
+            let features = parent.waypoints
+                .filter { !isTraceEndpoint(latitude: $0.latitude, longitude: $0.longitude) }
+                .map { waypoint -> MLNPointFeature in
                 let feature = MLNPointFeature()
                 feature.coordinate = CLLocationCoordinate2D(
                     latitude: waypoint.latitude, longitude: waypoint.longitude)
@@ -638,6 +640,17 @@ struct MapView: UIViewRepresentable {
                 // The glyph's bottom sits ON the waypoint position.
                 layer.iconAnchor = NSExpression(forConstantValue: "bottom")
                 style.addLayer(layer)
+            }
+        }
+
+        /// A waypoint coincident with the trace start or finish is dropped
+        /// from the pin layer — its badge would only overlap the endpoint
+        /// flag already drawn there.
+        private func isTraceEndpoint(latitude: Double, longitude: Double) -> Bool {
+            let point = TrackPoint(latitude: latitude, longitude: longitude)
+            return [parent.trace?.points.first, parent.trace?.points.last].contains { endpoint in
+                guard let endpoint else { return false }
+                return Geo.distanceMeters(from: point, to: endpoint) < 30
             }
         }
 
