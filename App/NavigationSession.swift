@@ -77,6 +77,7 @@ final class NavigationSession: ObservableObject {
                 latitude: mark.latitude, longitude: mark.longitude,
                 name: mark.name,
                 category: mark.category)
+            centerZoomWindow(onKm: mark.km)
             return
         }
 
@@ -94,6 +95,19 @@ final class NavigationSession: ObservableObject {
             elevation: active.linearized.elevation(atDistance: projection.distanceAlong) ?? 0,
             latitude: snapped.latitude, longitude: snapped.longitude,
             name: nil)
+        centerZoomWindow(onKm: projection.distanceAlong / 1000)
+    }
+
+    /// Recenters a zoomed elevation window on `km` when a point picked on the
+    /// map falls outside it, keeping the circle visible on the profile. Left
+    /// alone when the point is already in view (no motion) or at full-trace
+    /// zoom; profile taps never call this — they land inside by construction.
+    private func centerZoomWindow(onKm km: Double) {
+        guard let window = visibleKmRange, !window.contains(km), let active else { return }
+        let maxKm = active.linearized.totalDistance / 1000
+        let span = window.upperBound - window.lowerBound
+        let lower = min(max(km - span / 2, 0), max(maxKm - span, 0))
+        visibleKmRange = lower...(lower + span)
     }
 
     /// Resolves a tap on the profile and adopts a nearby waypoint's metadata.
